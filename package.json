@@ -249,6 +249,13 @@
           "default": "png",
           "description": "Default export format for flowcharts"
         },
+        "codevisualizer.nodeZoomFontScale": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0.8,
+          "maximum": 0.8,
+          "description": "Maximum zoom when right-clicking a node, expressed as a multiple of the code font size inside that node. 1 keeps the font at its original size, 2 renders it twice as large."
+        },
         "codevisualizer.llm.enabled": {
           "type": "boolean",
           "default": false,

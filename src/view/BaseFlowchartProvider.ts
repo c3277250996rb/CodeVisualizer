@@ -101,15 +101,37 @@ export abstract class BaseFlowchartProvider {
     // Detect environment and apply any necessary compatibility fixes
     this.initializeEnvironment();
     
-    // Listen for configuration changes to update themes
+    // Listen for configuration changes to update themes and zoom settings
     this._disposables.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration("codevisualizer.theme")) {
           // Refresh the current view when theme changes
           this.updateView(vscode.window.activeTextEditor);
+          return;
+        }
+        if (e.affectsConfiguration("codevisualizer.nodeZoomFontScale")) {
+          // Update the focused-node zoom without re-rendering the whole diagram
+          this.getWebview()?.postMessage({
+            command: "nodeZoomFontScale",
+            payload: { scale: BaseFlowchartProvider.getNodeZoomFontScale() },
+          });
         }
       })
     );
+  }
+
+  /**
+   * Read the maximum zoom used when focusing a node from the context menu,
+   * expressed as a multiple of the code font size inside the node.
+   * 1 keeps the font at its original size, 2 doubles it.
+   */
+  private static getNodeZoomFontScale(): number {
+    const config = vscode.workspace.getConfiguration("codevisualizer");
+    const value = config.get<number>("nodeZoomFontScale", 0.8);
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return 0.8;
+    }
+    return Math.max(0.8, Math.min(0.8, value));
   }
 
   /**
@@ -805,6 +827,8 @@ export abstract class BaseFlowchartProvider {
         <script nonce="${nonce}">
             const vscode = acquireVsCodeApi();
             const INITIAL_LLM = ${JSON.stringify(llm)};
+            const INITIAL_NODE_ZOOM_FONT_SCALE = ${BaseFlowchartProvider.getNodeZoomFontScale()};
+            let nodeZoomFontScale = INITIAL_NODE_ZOOM_FONT_SCALE;
             let isLLMEnabled = false;
 
             function onNodeClick(start, end) {
@@ -831,6 +855,12 @@ export abstract class BaseFlowchartProvider {
                             if (newElem) newElem.classList.add('highlighted');
                         }
                         highlightedNodeId = newId;
+                        break;
+
+                    case 'nodeZoomFontScale':
+                        if (typeof message.payload.scale === 'number' && isFinite(message.payload.scale)) {
+                            nodeZoomFontScale = Math.max(0.8, Math.min(0.8, message.payload.scale));
+                        }
                         break;
 
                     case 'applyMermaid': {
@@ -1056,7 +1086,7 @@ export abstract class BaseFlowchartProvider {
                     fit: true,
                     center: true,
                     minZoom: 0.1,
-                    maxZoom: 10,
+                    maxZoom: 20,
                     zoomScaleSensitivity: 0.2,
                     onZoom: function() {
                         notifyInteractionStart();
@@ -1067,6 +1097,86 @@ export abstract class BaseFlowchartProvider {
                         notifyInteractionEnd();
                     }
                 });
+
+                  svgElement.addEventListener('contextmenu', (event) => {
+                    event.preventDefault();
+                    const target = event.target instanceof Element ? event.target.closest('.node') : null;
+
+                    notifyInteractionStart();
+                    if (!target) {
+                      panZoomInstance.fit();
+                      panZoomInstance.center();
+                      notifyInteractionEnd();
+                      return;
+                    }
+
+                    const nodeBounds = target.getBoundingClientRect();
+                    const viewBounds = svgElement.getBoundingClientRect();
+                    if (nodeBounds.width === 0 || nodeBounds.height === 0 || viewBounds.width === 0 || viewBounds.height === 0) {
+                      notifyInteractionEnd();
+                      return;
+                    }
+
+                    const focus = {
+                      x: nodeBounds.left + nodeBounds.width / 2,
+                      y: nodeBounds.top + nodeBounds.height / 2,
+                    };
+                    // Zoom so the code text inside the node renders at nodeZoomFontScale
+                    // times its natural size. This value is the zoom ceiling: it does not
+                    // depend on the current zoom, so changing the setting always changes the
+                    // result (the previous formula multiplied the already fitted zoom by a
+                    // fill factor, which saturated at maxZoom for every value).
+                    const currentZoom = panZoomInstance.getZoom();
+                    const codeElement = target.querySelector('.code-label') || target;
+                    const baseFontPx = parseFloat(window.getComputedStyle(codeElement).fontSize) || 16;
+                    let currentScale = currentZoom;
+                    try {
+                      const bbox = target.getBBox();
+                      if (bbox.width > 0 && nodeBounds.width > 0) {
+                        // Rendered px / SVG user unit: covers pan-zoom and the SVG viewBox scale
+                        currentScale = nodeBounds.width / bbox.width;
+                      }
+                    } catch {
+                      // getBBox is unavailable for non-SVG targets; fall back to the pan-zoom level
+                    }
+                    if (!isFinite(currentScale) || currentScale <= 0) {
+                      currentScale = currentZoom;
+                    }
+                    const targetZoom = Math.max(0.1, Math.min(20, currentZoom * nodeZoomFontScale / currentScale));
+                    console.debug('[CodeVisualizer] node focus zoom', {
+                      nodeZoomFontScale,
+                      baseFontPx,
+                      currentZoom,
+                      currentScale,
+                      renderedFontPx: baseFontPx * currentScale * targetZoom / currentZoom,
+                      targetZoom,
+                    });
+                    panZoomInstance.zoomAtPoint(targetZoom, focus);
+
+                    // pan() only lands on the next animation frame, so re-measure and
+                    // correct a few frames until the node is truly centered.
+                    let centerAttempts = 0;
+                    const centerNode = () => {
+                      const zoomedBounds = target.getBoundingClientRect();
+                      const dx = viewBounds.left + viewBounds.width / 2 - (zoomedBounds.left + zoomedBounds.width / 2);
+                      const dy = viewBounds.top + viewBounds.height / 2 - (zoomedBounds.top + zoomedBounds.height / 2);
+                      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) {
+                        return true;
+                      }
+                      const pan = panZoomInstance.getPan();
+                      panZoomInstance.pan({ x: pan.x + dx, y: pan.y + dy });
+                      return false;
+                    };
+                    const centerStep = () => {
+                      centerAttempts += 1;
+                      if (centerNode() || centerAttempts >= 3) {
+                        notifyInteractionEnd();
+                        return;
+                      }
+                      requestAnimationFrame(centerStep);
+                    };
+                    requestAnimationFrame(centerStep);
+                  });
 
                 // Track mouse interactions for panning/dragging
                 let isMouseDown = false;
@@ -1282,6 +1392,7 @@ export abstract class BaseFlowchartProvider {
 
                     function updateToolbarState() {
                     toolbarContainer.classList.toggle('hidden', isToolbarHidden);
+                    document.body.classList.toggle('toolbar-hidden', isToolbarHidden);
                         toolbarToggle.title = isToolbarHidden ? 'Show toolbar' : 'Hide toolbar';
                         toolbarToggle.setAttribute('aria-label', toolbarToggle.title);
                     }
@@ -1491,6 +1602,9 @@ export abstract class BaseFlowchartProvider {
         }
         #toolbar-container.hidden {
             display: none;
+        }
+        body.toolbar-hidden .svg-pan-zoom-control {
+          display: none !important;
         }
         #export-controls button, #open-panel-btn {
             background-color: var(--vscode-button-background);
