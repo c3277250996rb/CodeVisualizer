@@ -718,6 +718,22 @@ export abstract class BaseFlowchartProvider {
             .mermaid .code-label {
               font-family: 'JetBrains Mono', Consolas, monospace !important;
             }
+            .mermaid .code-comment {
+              font-family: 'JetBrains Mono', Consolas, monospace !important;
+              font-size: 0.85em !important;
+            }
+            .mermaid .boolean-edge-label,
+            .mermaid .boolean-edge-label * {
+              font-family: 'Segoe UI Symbol', sans-serif !important;
+              background: transparent !important;
+            }
+            .mermaid .boolean-edge-label-bkg {
+              background: transparent !important;
+            }
+            .mermaid .boolean-edge-label--false,
+            .mermaid .boolean-edge-label--false * {
+              color: #d93025 !important;
+            }
 
             /* Node highlighting styles */
             .highlighted > rect,
@@ -947,6 +963,42 @@ export abstract class BaseFlowchartProvider {
 
             function setupInteractions(svgElement) {
                 if (!svgElement) return;
+
+                svgElement.querySelectorAll('.node.node-decision > rect').forEach((rect) => {
+                  const x = Number(rect.getAttribute('x'));
+                  const y = Number(rect.getAttribute('y'));
+                  const width = Number(rect.getAttribute('width'));
+                  const height = Number(rect.getAttribute('height'));
+                  const centerX = x + width / 2;
+                  const centerY = y + height / 2;
+                  const diamondWidth = width * 1.25;
+                  const diamondHeight = height * 1.6;
+                  const diamond = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                  diamond.setAttribute('points', [
+                    (centerX - diamondWidth / 2) + ',' + centerY,
+                    centerX + ',' + (centerY - diamondHeight / 2),
+                    (centerX + diamondWidth / 2) + ',' + centerY,
+                    centerX + ',' + (centerY + diamondHeight / 2),
+                  ].join(' '));
+                  Array.from(rect.attributes).forEach((attribute) => {
+                    if (!['x', 'y', 'width', 'height', 'rx', 'ry'].includes(attribute.name)) {
+                      diamond.setAttribute(attribute.name, attribute.value);
+                    }
+                  });
+                  rect.replaceWith(diamond);
+                });
+
+                svgElement.querySelectorAll('.edgeLabel').forEach((label) => {
+                  const text = label.textContent.trim();
+                  if (text === String.fromCodePoint(0x2714, 0xfe0f)) {
+                    label.classList.add('boolean-edge-label');
+                  } else if (text === String.fromCodePoint(0x2716)) {
+                    label.classList.add('boolean-edge-label', 'boolean-edge-label--false');
+                  }
+                  if (label.classList.contains('boolean-edge-label')) {
+                    label.querySelector('.labelBkg')?.classList.add('boolean-edge-label-bkg');
+                  }
+                });
 
                 svgElement.querySelectorAll('.node').forEach((node) => {
                   node.querySelectorAll('.comment-divider').forEach((divider) => divider.remove());

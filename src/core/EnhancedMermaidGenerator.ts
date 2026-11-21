@@ -107,7 +107,7 @@ export class EnhancedMermaidGenerator {
       const codeLabel = this.escapeString(node.label);
       const codeBlock = `<div class="code-label" style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${codeLabel}</div>`;
       const label = node.comment
-        ? `<div class="code-comment" style="display:table;max-width:100%;margin:0 auto;padding:2px 4px 5px;text-align:left;font-size:11px">${this.escapeString(node.comment)}</div>${codeBlock}`
+        ? `<div class="code-comment" style="display:table;max-width:100%;margin:0 auto;padding:2px 4px 5px;text-align:left">${this.escapeString(node.comment)}</div>${codeBlock}`
         : codeBlock;
 
       this.sb.append("    ");
@@ -126,7 +126,13 @@ export class EnhancedMermaidGenerator {
       this.sb.append(edge.from);
 
       if (edge.label) {
-        const label = this.escapeString(edge.label);
+        const normalizedLabel = edge.label.trim().toLowerCase();
+        const displayLabel = normalizedLabel === "true"
+          ? "✔️"
+          : normalizedLabel === "false"
+            ? "✖"
+            : edge.label;
+        const label = this.escapeString(displayLabel);
         this.sb.append(' -- "');
         this.sb.append(label);
         this.sb.append('" --> ');
@@ -280,6 +286,9 @@ export class EnhancedMermaidGenerator {
 
   private getShape(node: FlowchartNode): [string, string] {
     if (node.nodeType) {
+      if (node.nodeType === NodeType.DECISION) {
+        return ["[", "]"];
+      }
       const nodeStyle = SubtleThemeManager.getNodeStyle(node.nodeType);
       return this.getShapeMarkers(nodeStyle.shape);
     }

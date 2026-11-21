@@ -43,6 +43,8 @@ suite("C flowchart parser", () => {
     const mermaid = new EnhancedMermaidGenerator().generate(flowchart);
     assert.ok(mermaid.includes('class="code-comment"'));
     assert.ok(mermaid.includes("Reject non-positive input"));
+    assert.ok(mermaid.includes(String.fromCodePoint(0x2714, 0xfe0f)));
+    assert.ok(mermaid.includes(String.fromCodePoint(0x2716)));
     assert.ok(!mermaid.includes("- - - -"));
   });
 
