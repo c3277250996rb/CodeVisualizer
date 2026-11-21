@@ -109,6 +109,13 @@ export class CAstParser extends AbstractParser {
       this.extractFunctionName(declarator) || "[anonymous]"
     );
     const title = `Flowchart for function: ${funcNameStr}`;
+    const precedingComment = tree.rootNode.namedChildren
+      .filter((node) => node.type === "comment" && node.endIndex <= targetNode!.startIndex)
+      .pop();
+    const headerComment = precedingComment &&
+      sourceCode.slice(precedingComment.endIndex, targetNode.startIndex).trim() === ""
+      ? this.normalizeComment(precedingComment.text)
+      : undefined;
 
     if (!bodyToProcess) {
       return {
@@ -180,6 +187,7 @@ export class CAstParser extends AbstractParser {
       locationMap: this.locationMap,
       functionRange: { start: targetNode.startIndex, end: targetNode.endIndex },
       title,
+      headerComment,
       entryNodeId: entryId,
       exitNodeId: exitId,
     };

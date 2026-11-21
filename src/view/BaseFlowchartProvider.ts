@@ -552,7 +552,13 @@ export abstract class BaseFlowchartProvider {
 
       const ctx = getExtensionContext();
       const availability = ctx ? await LLMManager.getAvailability(ctx) : { enabled: false, provider: "openai", model: "" };
-      this.setWebviewHtml(this.getWebviewContent(mermaidCode, this.getNonce(), availability, codeMetrics));
+      this.setWebviewHtml(this.getWebviewContent(
+        mermaidCode,
+        this.getNonce(),
+        availability,
+        codeMetrics,
+        flowchartIR.headerComment
+      ));
 
       // After updating the view, immediately highlight the node for the current cursor
       const offset = editor.document.offsetAt(editor.selection.active);
@@ -614,7 +620,8 @@ export abstract class BaseFlowchartProvider {
     flowchartSyntax: string,
     nonce: string,
     llmAvailability?: { enabled: boolean; provider: string; model: string },
-    codeMetrics?: CodeMetrics
+    codeMetrics?: CodeMetrics,
+    headerComment?: string
   ): string {
     const theme =
       vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark
@@ -624,17 +631,33 @@ export abstract class BaseFlowchartProvider {
     const context = this.getViewContext();
 
     const llm = llmAvailability || { enabled: false, provider: "openai", model: "" };
+    const headerCommentPanel = headerComment
+      ? `<div id="function-comment" tabindex="0">${headerComment.replace(/[&<>"']/g, (character) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[character]!)}</div>`
+      : "";
     return `<!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
 
-        <meta http-equiv="Content-Security-Policy" content="${EnvironmentDetector.getContentSecurityPolicy(nonce)}">
+        <meta http-equiv="Content-Security-Policy" content="${EnvironmentDetector.getContentSecurityPolicy(nonce, this.getWebview()?.cspSource || "'self'")}">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Code Flowchart</title>
         <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js"></script>
         <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@${SVG_PAN_ZOOM_VERSION}/dist/svg-pan-zoom.min.js"></script>
         <style>
+          @font-face {
+            font-family: 'JetBrains Mono';
+            src: url('${this.getWebview()?.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "media", "fonts", "JetBrainsMono-Regular.woff2"))}') format('woff2');
+            font-style: normal;
+            font-weight: 400;
+            font-display: swap;
+          }
             :root {
                 --hover-fill: rgba(255, 165, 0, 0.3);
                 --hover-stroke: #ff6b35;
@@ -665,8 +688,36 @@ export abstract class BaseFlowchartProvider {
                     : ""
                 }
             }
+              #function-comment {
+                position: fixed;
+                z-index: 5;
+                top: 32px;
+                left: 42px;
+                right: 10px;
+                max-height: 120px;
+                overflow: auto;
+                box-sizing: border-box;
+                padding: 8px 10px;
+                border: 1px solid var(--vscode-panel-border);
+                background: var(--vscode-editor-background);
+                color: var(--vscode-editor-foreground);
+                border-radius: 8px;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+                font-size: 12px;
+                line-height: 1.45;
+                opacity: 0.78;
+                transition: opacity 0.18s ease;
+                white-space: pre-wrap;
+              }
+              #function-comment:hover,
+              #function-comment:focus {
+                opacity: 1;
+              }
             .mermaid { width: 100%; height: 100%; }
             .mermaid svg { width: 100%; height: 100%; }
+            .mermaid .code-label {
+              font-family: 'JetBrains Mono', Consolas, monospace !important;
+            }
 
             /* Node highlighting styles */
             .highlighted > rect,
@@ -729,6 +780,7 @@ export abstract class BaseFlowchartProvider {
     </head>
     <body>
         ${ this.getHtmlForControls(context, codeMetrics) }
+      ${headerCommentPanel}
         <div id="container">
             <div class="mermaid">${flowchartSyntax}</div>
         </div>

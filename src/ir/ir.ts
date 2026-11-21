@@ -75,4 +75,5 @@ export interface FlowchartIR {
   locationMap: LocationMapEntry[];
   functionRange?: { start: number; end: number };
   title?: string;
+  headerComment?: string;
 }

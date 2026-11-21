@@ -18,6 +18,7 @@ suite("C flowchart parser", () => {
 
   test("generates a flowchart for the commented C sample", () => {
     const source = [
+      "/* Function summary. */",
       "int sum_positive(int value) {",
       "  // Reject non-positive input.",
       "  if (value <= 0) { return 0; }",
@@ -30,6 +31,8 @@ suite("C flowchart parser", () => {
     const flowchart = parser.generateFlowchart(source, "sum_positive");
 
     assert.strictEqual(flowchart.title, "Flowchart for function: sum_positive");
+    assert.strictEqual(flowchart.headerComment, "Function summary.");
+    assert.strictEqual(flowchart.nodes.find((node) => node.nodeType === NodeType.ENTRY)?.comment, undefined);
     const decisionCommentNode = flowchart.nodes.find(
       (node) => node.nodeType === NodeType.DECISION && node.comment?.includes("Reject non-positive input")
     );
@@ -73,7 +76,7 @@ suite("C flowchart parser", () => {
     const escapedUserDataPath = testUserDataPath.replace(/'/g, "''");
     const captureScript = [
       "$ErrorActionPreference = 'Stop'",
-      "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class TestWindow { [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); }'",
+      "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class TestWindow { [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, [Out] int[] rect); [DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int x, int y); [DllImport(\"user32.dll\")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extraInfo); }'",
       "Add-Type -AssemblyName System.Windows.Forms",
       "Add-Type -AssemblyName System.Drawing",
       `$target = Get-Process -Id ${process.ppid} -ErrorAction SilentlyContinue`,
@@ -83,6 +86,13 @@ suite("C flowchart parser", () => {
       "[void][TestWindow]::ShowWindowAsync($target.MainWindowHandle, 9)",
       "$shell = New-Object -ComObject WScript.Shell",
       "if (-not $shell.AppActivate($target.Id)) { throw 'Could not activate the extension development host window.' }",
+      "Start-Sleep -Milliseconds 500",
+      "$windowRect = New-Object int[] 4",
+      "[void][TestWindow]::GetWindowRect($target.MainWindowHandle, $windowRect)",
+      "$chartX = $windowRect[0] + [int](($windowRect[2] - $windowRect[0]) * 0.6)",
+      "$chartY = $windowRect[1] + [int](($windowRect[3] - $windowRect[1]) * 0.52)",
+      "[void][TestWindow]::SetCursorPos($chartX, $chartY)",
+      "[TestWindow]::mouse_event(0x0800, 0, 0, 1800, [UIntPtr]::Zero)",
       "Start-Sleep -Milliseconds 500",
       "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds",
       "$bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)",
