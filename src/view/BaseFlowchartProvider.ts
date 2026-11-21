@@ -1139,11 +1139,29 @@ export abstract class BaseFlowchartProvider {
                     });
                 }
 
+                const toolbarToggle = document.getElementById('toolbar-toggle');
+                const toolbarContainer = document.getElementById('toolbar-container');
+                if (toolbarToggle && toolbarContainer) {
+                    let isToolbarHidden = true;
+
+                    function updateToolbarState() {
+                    toolbarContainer.classList.toggle('hidden', isToolbarHidden);
+                        toolbarToggle.title = isToolbarHidden ? 'Show toolbar' : 'Hide toolbar';
+                        toolbarToggle.setAttribute('aria-label', toolbarToggle.title);
+                    }
+
+                    updateToolbarState();
+                    toolbarToggle.addEventListener('click', () => {
+                        isToolbarHidden = !isToolbarHidden;
+                        updateToolbarState();
+                    });
+                }
+
                 // Metrics toggle functionality
                 const metricsToggle = document.getElementById('metrics-toggle');
                 const metricsPanel = document.getElementById('metrics-panel');
                 if (metricsToggle && metricsPanel) {
-                    let isMetricsHidden = false;
+                  let isMetricsHidden = true;
                     
                     function updateMetricsToggleState() {
                         if (isMetricsHidden) {
@@ -1335,6 +1353,9 @@ export abstract class BaseFlowchartProvider {
             ${context.isPanel ? "" : "top: 10px; right: 10px;"}
             z-index: 1000; display: flex; gap: 10px;
         }
+        #toolbar-container.hidden {
+            display: none;
+        }
         #export-controls button, #open-panel-btn {
             background-color: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
@@ -1353,6 +1374,27 @@ export abstract class BaseFlowchartProvider {
             padding: 6px 10px; cursor: pointer; border-radius: 4px; font-size: 11px;
         }
         #llm-toggle[disabled] { opacity: 0.6; cursor: default; }
+
+        #toolbar-toggle {
+            width: 26px;
+            height: 26px;
+            padding: 0;
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: 1px solid var(--vscode-button-border, transparent);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        #toolbar-toggle:hover {
+            background-color: var(--vscode-button-hoverBackground);
+        }
+        #toolbar-toggle-container {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+          z-index: 1002;
+        }
 
         /* Metrics panel */
         #metrics-container {
@@ -1435,6 +1477,10 @@ export abstract class BaseFlowchartProvider {
    * Helper to generate HTML for controls.
    */
   private getHtmlForControls(context: any, codeMetrics?: CodeMetrics): string {
+    const toolbarToggleButton = `
+        <button id="toolbar-toggle" title="Show toolbar" aria-label="Show toolbar">☰</button>
+    `;
+
     // Metrics toggle button - goes in the toolbar
     const metricsToggleButton = codeMetrics ? `
                 <button id="metrics-toggle" title="Toggle metrics display">📈</button>
@@ -1474,27 +1520,33 @@ export abstract class BaseFlowchartProvider {
     ` : '';
 
     const panelControls = `
-        <div id="panel-controls">
-            <div>Flowchart Viewer</div>
-            <div id="export-controls">
-                <button id="copy-mermaid" title="Copy Mermaid Code">Copy Code</button>
-                <button id="export-svg" title="Export as SVG">SVG</button>
-                <button id="export-png" title="Export as PNG">PNG</button>
-                ${metricsToggleButton}
-                <button id="llm-toggle" title="Toggle human-friendly labels"></button>
+        <div id="toolbar-toggle-container">${toolbarToggleButton}</div>
+        <div id="toolbar-container" class="hidden">
+            <div id="panel-controls">
+                <div>Flowchart Viewer</div>
+                <div id="export-controls">
+                    <button id="copy-mermaid" title="Copy Mermaid Code">Copy Code</button>
+                    <button id="export-svg" title="Export as SVG">SVG</button>
+                    <button id="export-png" title="Export as PNG">PNG</button>
+                    ${metricsToggleButton}
+                    <button id="llm-toggle" title="Toggle human-friendly labels"></button>
+                </div>
             </div>
         </div>
         ${metricsPanel}
     `;
 
     const sidebarControls = `
-        <div id="export-controls">
-            ${context.showPanelButton ? '<button id="open-panel-btn">Open in New Window</button>' : ''}
-            <button id="copy-mermaid" title="Copy Mermaid Code">Copy Code</button>
-            <button id="export-svg">Export as SVG</button>
-            <button id="export-png">Export as PNG</button>
-            ${metricsToggleButton}
-            <button id="llm-toggle" title="Toggle human-friendly labels"></button>
+        <div id="toolbar-toggle-container">${toolbarToggleButton}</div>
+        <div id="toolbar-container" class="hidden">
+            <div id="export-controls">
+                ${context.showPanelButton ? '<button id="open-panel-btn">Open in New Window</button>' : ''}
+                <button id="copy-mermaid" title="Copy Mermaid Code">Copy Code</button>
+                <button id="export-svg">Export as SVG</button>
+                <button id="export-png">Export as PNG</button>
+                ${metricsToggleButton}
+                <button id="llm-toggle" title="Toggle human-friendly labels"></button>
+            </div>
         </div>
         ${metricsPanel}
     `;
