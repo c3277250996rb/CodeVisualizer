@@ -46,14 +46,15 @@ export class FlowchartPanelProvider extends BaseFlowchartProvider {
 
   public createOrShow(
     viewColumn?: vscode.ViewColumn,
-    moveToNewWindow: boolean = false
+    moveToNewWindow: boolean = false,
+    editor: vscode.TextEditor | undefined = vscode.window.activeTextEditor
   ): void {
     if (this._panel) {
       this._panel.reveal(viewColumn);
       if (moveToNewWindow) {
         this.moveToNewWindow();
       }
-      this.forceUpdateView(vscode.window.activeTextEditor);
+      this.forceUpdateView(editor);
       return;
     }
     const config = vscode.workspace.getConfiguration("codevisualizer");
@@ -119,7 +120,10 @@ export class FlowchartPanelProvider extends BaseFlowchartProvider {
         if (e.webviewPanel.active) {
           this.updateTitle();
           setTimeout(() => {
-            this.forceUpdateView(vscode.window.activeTextEditor);
+            const activeEditor = vscode.window.activeTextEditor || editor;
+            if (activeEditor) {
+              this.forceUpdateView(activeEditor);
+            }
           }, 50);
         }
       },
@@ -135,7 +139,7 @@ export class FlowchartPanelProvider extends BaseFlowchartProvider {
 
     this.setupEventListeners();
 
-    this.updateView(vscode.window.activeTextEditor);
+    this.updateView(editor);
 
     if (moveToNewWindow) {
       // Use setTimeout to ensure the panel is fully created before moving
