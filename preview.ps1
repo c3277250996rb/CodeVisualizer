@@ -6,7 +6,7 @@ if (-not (Test-Path -LiteralPath $codePath)) {
 }
 
 $workspacePath = $PSScriptRoot
-$samplePath = Join-Path $workspacePath 'test-files\preview_sample.c'
+$samplePath = Join-Path $workspacePath 'test-files\motor_comment_sample.c'
 $userDataPath = Join-Path $workspacePath '.vscode-test\preview-user-data'
 $settingsPath = Join-Path $userDataPath 'User\settings.json'
 

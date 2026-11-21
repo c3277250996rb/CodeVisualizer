@@ -52,7 +52,7 @@ suite("C flowchart parser", () => {
     assert.ok(extension, "CodeVisualizer extension should be available in the test host");
     await extension.activate();
 
-    const samplePath = path.join(__dirname, "../../test-files/preview_sample.c");
+    const samplePath = path.join(__dirname, "../../test-files/motor_comment_sample.c");
     const document = await vscode.workspace.openTextDocument(vscode.Uri.file(samplePath));
     const editor = await vscode.window.showTextDocument(document, {
       viewColumn: vscode.ViewColumn.One,

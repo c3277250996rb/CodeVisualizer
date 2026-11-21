@@ -22,7 +22,7 @@ try {
 
     $readyWait = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath $readyFile) -and $readyWait.Elapsed.TotalSeconds -lt 10) {
-        [System.Threading.ManualResetEventSlim]::new($false).Wait(50)
+        Start-Sleep -Milliseconds 50
     }
     if (-not (Test-Path -LiteralPath $readyFile)) {
         throw 'Screen capture process did not become ready.'
