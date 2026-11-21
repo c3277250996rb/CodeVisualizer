@@ -896,6 +896,38 @@ export abstract class BaseFlowchartProvider {
             function setupInteractions(svgElement) {
                 if (!svgElement) return;
 
+                svgElement.querySelectorAll('.node').forEach((node) => {
+                  node.querySelectorAll('.comment-divider').forEach((divider) => divider.remove());
+
+                  const comment = node.querySelector('.code-comment');
+                  const code = node.querySelector('.code-label');
+                  const matrix = node.getScreenCTM();
+                  if (!comment || !code || !matrix) return;
+
+                  const commentRect = comment.getBoundingClientRect();
+                  const codeRect = code.getBoundingClientRect();
+                  const toNodePoint = (x, y) => {
+                    const point = svgElement.createSVGPoint();
+                    point.x = x;
+                    point.y = y;
+                    return point.matrixTransform(matrix.inverse());
+                  };
+                  const left = toNodePoint(commentRect.left, (commentRect.bottom + codeRect.top) / 2);
+                  const right = toNodePoint(commentRect.right, (commentRect.bottom + codeRect.top) / 2);
+                  const divider = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                  divider.classList.add('comment-divider');
+                  divider.setAttribute('x1', left.x);
+                  divider.setAttribute('y1', left.y);
+                  divider.setAttribute('x2', right.x);
+                  divider.setAttribute('y2', right.y);
+                  divider.setAttribute('stroke', '#8a8a8a');
+                  divider.setAttribute('stroke-width', '1');
+                  divider.setAttribute('stroke-dasharray', '4 3');
+                    divider.style.setProperty('stroke', '#8a8a8a', 'important');
+                  divider.setAttribute('pointer-events', 'none');
+                  node.appendChild(divider);
+                });
+
                 // Track user interaction state for pan/zoom
                 let interactionTimeout = null;
                 function notifyInteractionStart() {

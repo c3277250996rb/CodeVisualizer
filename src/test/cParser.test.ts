@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { EnhancedMermaidGenerator } from "../core/EnhancedMermaidGenerator";
 import { CAstParser } from "../core/language-services/c/CAstParser";
 import { NodeType } from "../ir/ir";
 
@@ -16,17 +17,30 @@ suite("C flowchart parser", () => {
   });
 
   test("generates a flowchart for the commented C sample", () => {
-    const samplePath = path.join(__dirname, "../../test-files/preview_sample.c");
-    const source = fs.readFileSync(samplePath, "utf8");
+    const source = [
+      "int sum_positive(int value) {",
+      "  // Reject non-positive input.",
+      "  if (value <= 0) { return 0; }",
+      "  return value;",
+      "}",
+    ].join("\n");
 
     assert.ok(parser.listFunctions(source).includes("sum_positive"));
 
     const flowchart = parser.generateFlowchart(source, "sum_positive");
 
     assert.strictEqual(flowchart.title, "Flowchart for function: sum_positive");
+    const decisionCommentNode = flowchart.nodes.find(
+      (node) => node.nodeType === NodeType.DECISION && node.comment?.includes("Reject non-positive input")
+    );
+    assert.ok(decisionCommentNode);
     assert.ok(flowchart.nodes.some((node) => node.nodeType === NodeType.DECISION));
-    assert.ok(flowchart.nodes.some((node) => node.label.includes("values[index]")));
     assert.ok(flowchart.edges.length > 0);
+
+    const mermaid = new EnhancedMermaidGenerator().generate(flowchart);
+    assert.ok(mermaid.includes('class="code-comment"'));
+    assert.ok(mermaid.includes("Reject non-positive input"));
+    assert.ok(!mermaid.includes("- - - -"));
   });
 
   test("opens the sample with CodeVisualizer and captures the rendered flowchart", async function () {
@@ -44,7 +58,9 @@ suite("C flowchart parser", () => {
       viewColumn: vscode.ViewColumn.One,
       preview: false,
     });
-    const position = document.positionAt(document.getText().indexOf("int total"));
+    const functionPosition = document.getText().indexOf("MyMotor_Init");
+    assert.ok(functionPosition >= 0, "Preview sample should contain MyMotor_Init");
+    const position = document.positionAt(functionPosition);
     editor.selection = new vscode.Selection(position, position);
 
     await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");

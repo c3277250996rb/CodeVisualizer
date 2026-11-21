@@ -141,6 +141,22 @@ export class CAstParser extends AbstractParser {
     nodes.push(...bodyResult.nodes);
     edges.push(...bodyResult.edges);
 
+    for (const commentNode of bodyToProcess.descendantsOfType("comment")) {
+      const target = nodes
+        .filter(
+          (node) =>
+            node.location &&
+            node.location.start >= commentNode.endIndex &&
+            node.nodeType !== NodeType.LOOP_END
+        )
+        .sort((left, right) => left.location!.start - right.location!.start)[0];
+
+      if (target) {
+        const comment = this.normalizeComment(commentNode.text);
+        target.comment = target.comment ? `${target.comment} ${comment}` : comment;
+      }
+    }
+
     edges.push(
       bodyResult.entryNodeId
         ? { from: entryId, to: bodyResult.entryNodeId }
@@ -290,6 +306,17 @@ export class CAstParser extends AbstractParser {
       (child) => child.type === "identifier"
     );
     return identifierChild?.text || null;
+  }
+
+  private normalizeComment(comment: string): string {
+    return comment
+      .replace(/^\/\/+/, "")
+      .replace(/^\/\*+/, "")
+      .replace(/\*\/$/, "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*\*\s?/, "").trim())
+      .filter(Boolean)
+      .join(" ");
   }
 
   private processIfStatement(

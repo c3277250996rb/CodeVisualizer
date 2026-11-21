@@ -44,6 +44,7 @@ export interface SemanticNodeInfo {
 export interface FlowchartNode {
   id: string;
   label: string;
+  comment?: string;
   location?: Location;
   shape?: "rect" | "diamond" | "round" | "stadium";
   style?: string;

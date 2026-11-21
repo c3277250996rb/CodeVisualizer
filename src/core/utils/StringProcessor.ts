@@ -46,7 +46,7 @@ export class StringProcessor {
     escaped = escaped.replace(this.colonRegex, "").trim();
 
     // Length limiting for readability
-    const MAX_LABEL_LENGTH = 80;
+    const MAX_LABEL_LENGTH = 256;
     if (escaped.length > MAX_LABEL_LENGTH) {
       escaped = escaped.substring(0, MAX_LABEL_LENGTH - 3) + "...";
     }
