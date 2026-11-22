@@ -1575,18 +1575,8 @@ export abstract class BaseFlowchartProvider {
                     }
                 });
 
-                  svgElement.addEventListener('contextmenu', (event) => {
-                    event.preventDefault();
-                    const target = event.target instanceof Element ? event.target.closest('.node') : null;
-
-                    notifyInteractionStart();
-                    if (!target) {
-                      panZoomInstance.fit();
-                      panZoomInstance.center();
-                      notifyInteractionEnd();
-                      return;
-                    }
-
+                  // 局部放大：把某个节点放大并居中（双击节点触发）
+                  function zoomToNode(target) {
                     const nodeBounds = target.getBoundingClientRect();
                     const viewBounds = svgElement.getBoundingClientRect();
                     if (nodeBounds.width === 0 || nodeBounds.height === 0 || viewBounds.width === 0 || viewBounds.height === 0) {
@@ -1653,6 +1643,41 @@ export abstract class BaseFlowchartProvider {
                       requestAnimationFrame(centerStep);
                     };
                     requestAnimationFrame(centerStep);
+                  }
+
+                  // 右键单击代码行进入编辑；右键空白处复位全图
+                  svgElement.addEventListener('contextmenu', (event) => {
+                    event.preventDefault();
+                    const row = event.target instanceof Element
+                      ? event.target.closest('.code-cell[data-editable="1"], .code-label[data-editable="1"]')
+                      : null;
+                    if (!row) {
+                      notifyInteractionStart();
+                      panZoomInstance.fit();
+                      panZoomInstance.center();
+                      notifyInteractionEnd();
+                      return;
+                    }
+                    const start = Number(row.getAttribute('data-start'));
+                    const end = Number(row.getAttribute('data-end'));
+                    const codeElement = row.classList.contains('code-cell')
+                      ? row.querySelector('.code-cell-code')
+                      : row;
+                    startCodeEdit(codeElement || row, start, end);
+                  });
+
+                  // 双击节点局部放大；双击空白处复位全图
+                  svgElement.addEventListener('dblclick', (event) => {
+                    event.preventDefault();
+                    const target = event.target instanceof Element ? event.target.closest('.node') : null;
+                    notifyInteractionStart();
+                    if (!target) {
+                      panZoomInstance.fit();
+                      panZoomInstance.center();
+                      notifyInteractionEnd();
+                      return;
+                    }
+                    zoomToNode(target);
                   });
 
                 // 按节点类型定位并复用右键聚焦的放大逻辑。
@@ -1692,12 +1717,9 @@ export abstract class BaseFlowchartProvider {
                         }
                         return;
                     }
-                    // 直接走已有的右键聚焦分支，避免重复实现一套缩放算法
-                    try {
-                        target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, view: window }));
-                    } catch (error) {
-                        console.warn('[CodeVisualizer] focus node failed:', error);
-                    }
+                    // 直接复用双击节点的放大逻辑
+                    notifyInteractionStart();
+                    zoomToNode(target);
                 };
 
                 // Track mouse interactions for panning/dragging
@@ -1848,27 +1870,11 @@ export abstract class BaseFlowchartProvider {
                     if (!isFinite(start) || !isFinite(end)) {
                         return;
                     }
+                    // 双击局部放大、右键编辑都由 svg 上的统一监听处理
                     cell.addEventListener('click', (event) => {
                         // 阻止事件冒泡到整个节点，避免选中整块范围
                         event.stopPropagation();
                         onNodeClick(start, end);
-                    });
-                    cell.addEventListener('dblclick', (event) => {
-                        event.stopPropagation();
-                        startCodeEdit(cell.querySelector('.code-cell-code'), start, end);
-                    });
-                });
-
-                // 单条语句节点：双击同样进入行内编辑
-                svgElement.querySelectorAll('.code-label[data-start]').forEach((label) => {
-                    const start = Number(label.getAttribute('data-start'));
-                    const end = Number(label.getAttribute('data-end'));
-                    if (!isFinite(start) || !isFinite(end)) {
-                        return;
-                    }
-                    label.addEventListener('dblclick', (event) => {
-                        event.stopPropagation();
-                        startCodeEdit(label, start, end);
                     });
                 });
             }
@@ -2002,7 +2008,7 @@ export abstract class BaseFlowchartProvider {
                 resize();
 
                 // 编辑框内的鼠标事件一律不外传：否则拖动选字会变成平移画布
-                ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'click', 'dblclick', 'auxclick', 'wheel', 'touchstart', 'touchmove'].forEach((type) => {
+                ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'click', 'dblclick', 'auxclick', 'contextmenu', 'wheel', 'touchstart', 'touchmove'].forEach((type) => {
                     editor.addEventListener(type, (event) => event.stopPropagation());
                 });
                 if (panZoomInstance) {
