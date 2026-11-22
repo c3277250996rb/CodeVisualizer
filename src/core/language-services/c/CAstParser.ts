@@ -308,6 +308,15 @@ export class CAstParser extends AbstractParser {
     }
 
     switch (statement.type) {
+      case "compound_statement":
+        // 循环体、else 分支这类位置拿到的是 { } 块：
+        // 必须逐条展开成节点，不能把整块当成一条语句
+        return this.processBlock(
+          statement,
+          exitId,
+          loopContext,
+          finallyContext
+        );
       case "if_statement":
         return this.processIfStatement(
           statement,
@@ -464,8 +473,13 @@ export class CAstParser extends AbstractParser {
       allExitPoints.push({ id: ifConditionId, label: "True" });
     }
 
-    // Handle else clause - could be another if statement (else if) or a block
-    const elseNode = ifNode.childForFieldName("alternative");
+    // Handle else clause - could be another if statement (else if) or a block.
+    // tree-sitter-c 把 else 包在 else_clause 里，必须先拆一层，
+    // 否则整段 "else if (...) {...}" 会被当成一条普通语句。
+    const alternative = ifNode.childForFieldName("alternative");
+    const elseNode = alternative
+      ? this.unwrapElseClause(alternative)
+      : undefined;
     if (elseNode) {
       const elseResult = this.processStatementOrBlock(
         elseNode,
@@ -502,6 +516,21 @@ export class CAstParser extends AbstractParser {
       allExitPoints,
       nodesConnectedToExit
     );
+  }
+
+  /**
+   * tree-sitter-c 把 else 整体包在 else_clause 节点里：
+   * `else { ... }` 里面是 compound_statement，`else if (...)` 里面是 if_statement。
+   * 这里取出真正承载逻辑的那条语句，注释等额外节点跳过。
+   */
+  private unwrapElseClause(
+    node: Parser.SyntaxNode
+  ): Parser.SyntaxNode | undefined {
+    if (node.type !== "else_clause") {
+      return node;
+    }
+    const body = node.namedChildren.find((child) => child.type !== "comment");
+    return body ? this.unwrapElseClause(body) : undefined;
   }
 
   private processForStatement(

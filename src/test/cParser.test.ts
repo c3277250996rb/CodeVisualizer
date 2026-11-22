@@ -30,26 +30,26 @@ suite("C flowchart parser", () => {
   const SMOKE_TEST = "opens MyAdc_SendTelemetry and zooms into the loop";
   const VARS_TEST = "VARS 变量面板跟随函数与文件刷新";
   const SWITCH_TEST = "SWITCH 切函数时清空画布并重置缩放";
+  const ELSE_TEST = "ELSE else 与 else if 要识别成判断分支";
+  const LOOPBODY_TEST = "LOOPBODY while 与 do-while 的循环体要逐条展开";
+
+  const ANY_TEST = (): boolean =>
+    selected(PARSER_TEST) ||
+    selected(SMOKE_TEST) ||
+    selected(VARS_TEST) ||
+    selected(SWITCH_TEST) ||
+    selected(ELSE_TEST) ||
+    selected(LOOPBODY_TEST);
 
   suiteSetup(async () => {
-    if (
-      !selected(PARSER_TEST) &&
-      !selected(SMOKE_TEST) &&
-      !selected(VARS_TEST) &&
-      !selected(SWITCH_TEST)
-    ) {
+    if (!ANY_TEST()) {
       return;
     }
     const wasmPath = path.join(__dirname, "../../dist/tree-sitter-c.wasm");
     parser = await CAstParser.create(wasmPath);
   });
 
-  if (
-    !selected(PARSER_TEST) &&
-    !selected(SMOKE_TEST) &&
-    !selected(VARS_TEST) &&
-    !selected(SWITCH_TEST)
-  ) {
+  if (!ANY_TEST()) {
     test("filter matched no tests", () => {
       assert.fail(`CODEVISUALIZER_TEST_ONLY="${ONLY}" 没有匹配的用例`);
     });
@@ -317,6 +317,311 @@ suite("C flowchart parser", () => {
       });
       const secondPosition = document.positionAt(secondFunction);
       editor.selection = new vscode.Selection(secondPosition, secondPosition);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      await vscode.window.tabGroups.close(tab);
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // else / else if：必须各自成为判断分支，不能退化成一条 "else ..." 普通语句
+  if (selected(ELSE_TEST)) {
+    test(ELSE_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      const motorPath = path.join(__dirname, "../../test-files/my_motor.c");
+      const motorText = require("fs").readFileSync(motorPath, "utf8") as string;
+      const ir = parser.generateFlowchart(motorText, "MyMotor_UpdateCurrentSample");
+
+      // 1) L3：else / else if 不能变成普通语句节点
+      const strayElse = ir.nodes.filter((node) => /^\s*else\b/i.test(node.label));
+      assert.deepStrictEqual(
+        strayElse.map((node) => node.label),
+        [],
+        "else / else if 不能被当成普通语句"
+      );
+
+      // 2) L3：else if 的条件本身要是一个判断节点
+      const elseIfDecision = ir.nodes.find(
+        (node) =>
+          node.nodeType === NodeType.DECISION &&
+          node.label.includes("stall_overcurrent_since_ticks")
+      );
+      assert.ok(elseIfDecision, "else if 的条件应该成为 decision 节点");
+
+      // 3) L3：外层 if 的 False 分支要连到 else if 判断节点，True 分支连到刹车动作
+      const outerDecision = ir.nodes.find(
+        (node) =>
+          node.nodeType === NodeType.DECISION &&
+          node.label.includes("stall_overcurrent_active == 0U")
+      );
+      assert.ok(outerDecision, "外层 if 条件应该是 decision 节点");
+      const falseEdge = ir.edges.find(
+        (edge) => edge.from === outerDecision!.id && /^false$/i.test(edge.label || "")
+      );
+      assert.ok(falseEdge, "外层 if 必须有一条 False 分支");
+      assert.strictEqual(
+        falseEdge!.to,
+        elseIfDecision!.id,
+        "外层 if 的 False 分支应指向 else if 的判断节点"
+      );
+      const elseIfTrue = ir.edges.find(
+        (edge) => edge.from === elseIfDecision!.id && /^true$/i.test(edge.label || "")
+      );
+      assert.ok(elseIfTrue, "else if 必须有 True 分支");
+      const brakeNode = ir.nodes.find((node) => node.id === elseIfTrue!.to);
+      assert.ok(
+        brakeNode && brakeNode.label.includes("MyMotor_ApplyStallBrake"),
+        `else if 的 True 分支应通往刹车动作，实际是: ${brakeNode && brakeNode.label}`
+      );
+
+      // 4) L2：图源里 else if 的条件出现在判断节点上，分支箭头是 ✖
+      const mermaid = new EnhancedMermaidGenerator().generate(ir);
+      assert.ok(mermaid.includes("stall_overcurrent_since_ticks"), "图源里应有 else if 的条件");
+      assert.ok(
+        !/-- "else/i.test(mermaid),
+        "图源里不应该出现 else 标签的普通边"
+      );
+      assert.ok(
+        mermaid.includes(String.fromCodePoint(0x2716)),
+        "else 分支要渲染成 ✖"
+      );
+
+      // 5) L3：同一文件里的普通 else 也必须变成分支
+      const unescape = (text: string): string =>
+        text.replace(/#60;/g, "<").replace(/#62;/g, ">");
+      const dutyIr = parser.generateFlowchart(motorText, "MyMotor_UpdateDuty");
+      assert.deepStrictEqual(
+        dutyIr.nodes.filter((node) => /^\s*else\b/i.test(node.label)).map((node) => node.label),
+        [],
+        "普通 else 也不能被当成普通语句"
+      );
+      const dutyDecision = dutyIr.nodes.find(
+        (node) =>
+          node.nodeType === NodeType.DECISION &&
+          unescape(node.label).includes("motor_duty_percent < motor_target_duty_percent")
+      );
+      assert.ok(dutyDecision, "占空比小于目标的判断应是 decision 节点");
+      const dutyElseBody = dutyIr.nodes.find((node) =>
+        node.label.includes("motor_duty_percent--")
+      );
+      assert.ok(dutyElseBody, "else 分支里的语句要成为独立节点");
+      assert.ok(
+        dutyIr.edges.some(
+          (edge) =>
+            edge.from === dutyDecision!.id &&
+            edge.to === dutyElseBody!.id &&
+            /^false$/i.test(edge.label || "")
+        ),
+        "else 的语句必须挂在 False 分支上"
+      );
+
+      // 6) L4：用同文件里更小的 MyMotor_UpdateDuty 做画面证据（整图能看清两个 else 分支）
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(motorPath));
+      let editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const fnPosition = document.getText().indexOf("MyMotor_UpdateDuty");
+      assert.ok(fnPosition >= 0, "my_motor.c 应包含 MyMotor_UpdateDuty");
+      const cursor = document.positionAt(fnPosition);
+      editor.selection = new vscode.Selection(cursor, cursor);
+
+      await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+      const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+      const tab = await waitFor(
+        () =>
+          vscode.window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .find(isFlowchartPanel),
+        10000
+      );
+      assert.ok(tab, "Flowchart webview panel should open");
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // 面板抢焦后唤回编辑器，确保渲染的就是这个函数
+      editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      editor.selection = new vscode.Selection(cursor, cursor);
+      // 窄栏里节点文字太小，按 skill 要求先把面板那一列拉宽再实拍
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      await vscode.window.tabGroups.close(tab);
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // 循环体：while / do-while 的 {} 里必须逐条语句成节点，不能压成一整块
+  if (selected(LOOPBODY_TEST)) {
+    test(LOOPBODY_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      // 1) L3：用户报的 MyAdc_SendTelemetry 循环体不能塌成一块
+      const adcPath = path.join(__dirname, "../../test-files/my_adc.c");
+      const adcText = require("fs").readFileSync(adcPath, "utf8") as string;
+      const adcIr = parser.generateFlowchart(adcText, "MyAdc_SendTelemetry");
+      const collapsed = adcIr.nodes.filter((node) => /^\s*\{/.test(node.label));
+      assert.deepStrictEqual(
+        collapsed.map((node) => node.label.slice(0, 60)),
+        [],
+        "循环体不能被压成一整块语句"
+      );
+      const whileBody = adcIr.nodes.find((node) => node.label.includes("digits[--count]"));
+      assert.ok(whileBody, "while 循环体里的写字节语句要独立成节点");
+      const doBodyDigits = adcIr.nodes.find((node) => node.label.includes("digits[count++]"));
+      const doBodyDivide = adcIr.nodes.find((node) => node.label.includes("whole /= 10U"));
+      assert.ok(doBodyDigits, "do-while 体里的写数字语句要独立成节点");
+      assert.ok(doBodyDivide, "do-while 体里的移位语句要独立成节点");
+      assert.notStrictEqual(
+        doBodyDigits!.id,
+        doBodyDivide!.id,
+        "do-while 体内的两条语句要分成两个节点"
+      );
+      const whileDecision = adcIr.nodes.find(
+        (node) => node.nodeType === NodeType.DECISION && node.label.includes("count != 0U")
+      );
+      assert.ok(whileDecision, "while 的条件应是 decision 节点");
+      assert.ok(
+        adcIr.edges.some(
+          (edge) =>
+            edge.from === whileDecision!.id &&
+            edge.to === whileBody!.id &&
+            /^true$/i.test(edge.label || "")
+        ),
+        "while 的 True 分支要指向循环体第一条语句"
+      );
+      assert.ok(
+        adcIr.edges.some(
+          (edge) => edge.from === whileBody!.id && edge.to === whileDecision!.id
+        ),
+        "循环体末尾要回到 while 条件"
+      );
+      assert.ok(
+        adcIr.edges.some(
+          (edge) => edge.from === doBodyDigits!.id && edge.to === doBodyDivide!.id
+        ),
+        "do-while 体内的语句要顺序相连"
+      );
+
+      // 2) L2：图源里没有以 { 开头的整块节点
+      const adcMermaid = new EnhancedMermaidGenerator().generate(adcIr);
+      assert.ok(adcMermaid.includes("digits[--count]"), "图源里应有 while 体的语句");
+      assert.ok(!/">\s*\{/.test(adcMermaid), "图源里不应出现整块花括号语句");
+
+      // 3) L3：专向小样例里 while 与 do-while 体都要逐条展开
+      const samplePath = path.join(__dirname, "../../test-files/loop_body_sample.c");
+      const sampleText = require("fs").readFileSync(samplePath, "utf8") as string;
+      const whileIr = parser.generateFlowchart(sampleText, "while_body_sample");
+      const doIr = parser.generateFlowchart(sampleText, "do_body_sample");
+      for (const [name, sampleIr] of [
+        ["while_body_sample", whileIr],
+        ["do_body_sample", doIr],
+      ] as const) {
+        assert.deepStrictEqual(
+          sampleIr.nodes
+            .filter((node) => /^\s*\{/.test(node.label))
+            .map((node) => node.label.slice(0, 40)),
+          [],
+          `${name} 里不能出现整块花括号节点`
+        );
+      }
+      const totalAdd = whileIr.nodes.find((node) => node.label.includes("total += guard"));
+      const guardInc = whileIr.nodes.find((node) => node.label.includes("guard++"));
+      const totalSub = doIr.nodes.find((node) => node.label.includes("total -= 2"));
+      const doGuardInc = doIr.nodes.find((node) => node.label.includes("guard++"));
+      assert.ok(totalAdd && guardInc, "while 体的两条语句要各自成节点");
+      assert.ok(totalSub && doGuardInc, "do-while 体的两条语句要各自成节点");
+      assert.ok(
+        whileIr.edges.some(
+          (edge) => edge.from === totalAdd!.id && edge.to === guardInc!.id
+        ),
+        "while 体内两条语句要顺序相连"
+      );
+      assert.ok(
+        doIr.edges.some(
+          (edge) => edge.from === totalSub!.id && edge.to === doGuardInc!.id
+        ),
+        "do-while 体内两条语句要顺序相连"
+      );
+
+      // 4) L4：do-while 图小，整图 + 停留让 100ms 实拍看清循环体与回边
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(samplePath));
+      let editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const fnPosition = document.getText().indexOf("while_body_sample");
+      assert.ok(fnPosition >= 0, "样例里应有 while_body_sample");
+      const cursor = document.positionAt(fnPosition);
+      editor.selection = new vscode.Selection(cursor, cursor);
+
+      await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+      const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+      const tab = await waitFor(
+        () =>
+          vscode.window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .find(isFlowchartPanel),
+        10000
+      );
+      assert.ok(tab, "Flowchart webview panel should open");
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      editor.selection = new vscode.Selection(cursor, cursor);
+      // 窄栏里文字太小，先把面板那一列拉宽再实拍
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      // 再切到 do-while 样例，同一轮录屏里两张小图都能看清
+      const doPosition = document.getText().indexOf("do_body_sample");
+      assert.ok(doPosition > fnPosition, "样例里应有 do_body_sample");
+      const doCursor = document.positionAt(doPosition);
+      editor.selection = new vscode.Selection(doCursor, doCursor);
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
       await vscode.window.tabGroups.close(tab);
