@@ -1,12 +1,24 @@
 import * as assert from "assert";
-import { execFileSync } from "child_process";
-import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { EnhancedMermaidGenerator } from "../core/EnhancedMermaidGenerator";
 import { CAstParser } from "../core/language-services/c/CAstParser";
 import { NodeType } from "../ir/ir";
+
+/** 轮询等待条件成立，替代固定 sleep，避免无意义等待 */
+async function waitFor<T>(probe: () => T | undefined, timeoutMs: number): Promise<T | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = probe();
+    if (value) {
+      return value;
+    }
+    if (Date.now() >= deadline) {
+      return undefined;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
 
 suite("C flowchart parser", () => {
   let parser: CAstParser;
@@ -48,11 +60,9 @@ suite("C flowchart parser", () => {
     assert.ok(!mermaid.includes("- - - -"));
   });
 
-  test("opens the sample with CodeVisualizer and captures the rendered flowchart", async function () {
+  // 冒烟测试：命令能把 WebView 面板拉起来即可，不截图、不操作鼠标、不等固定时长
+  test("opens the flowchart panel for the sample", async function () {
     this.timeout(20000);
-    console.log(`VSCODE_TEST_RUNTIME_VERSION=${vscode.version}`);
-    assert.strictEqual(vscode.window.activeColorTheme.kind, vscode.ColorThemeKind.Light);
-
     const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
     assert.ok(extension, "CodeVisualizer extension should be available in the test host");
     await extension.activate();
@@ -64,54 +74,26 @@ suite("C flowchart parser", () => {
       preview: false,
     });
     const functionPosition = document.getText().indexOf("MyMotor_Init");
-    assert.ok(functionPosition >= 0, "Preview sample should contain MyMotor_Init");
+    assert.ok(functionPosition >= 0, "Sample should contain MyMotor_Init");
     const position = document.positionAt(functionPosition);
     editor.selection = new vscode.Selection(position, position);
 
     await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
-    await new Promise((resolve) => setTimeout(resolve, 5000));
 
-    const screenshotPath = path.join(os.tmpdir(), "CodeVisualizer-flowchart-e2e.png");
-    const escapedScreenshotPath = screenshotPath.replace(/'/g, "''");
-    const testUserDataPath = process.env.CODEVISUALIZER_TEST_USER_DATA;
-    assert.ok(testUserDataPath, "Test user data directory should be configured by test.ps1");
-    const escapedUserDataPath = testUserDataPath.replace(/'/g, "''");
-    const captureScript = [
-      "$ErrorActionPreference = 'Stop'",
-      "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class TestWindow { [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, [Out] int[] rect); [DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int x, int y); [DllImport(\"user32.dll\")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extraInfo); }'",
-      "Add-Type -AssemblyName System.Windows.Forms",
-      "Add-Type -AssemblyName System.Drawing",
-      `$target = Get-Process -Id ${process.ppid} -ErrorAction SilentlyContinue`,
-      `$userDataPath = '${escapedUserDataPath}'`,
-      `if (-not $target -or $target.MainWindowHandle -eq 0) { $targetProcess = Get-CimInstance Win32_Process -Filter "Name = 'Code.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($userDataPath) } | Select-Object -First 1; if ($targetProcess) { $target = Get-Process -Id $targetProcess.ProcessId -ErrorAction SilentlyContinue } }`,
-      "if (-not $target -or $target.MainWindowHandle -eq 0) { throw 'Extension Development Host window was not found.' }",
-      "[void][TestWindow]::ShowWindowAsync($target.MainWindowHandle, 9)",
-      "$shell = New-Object -ComObject WScript.Shell",
-      "if (-not $shell.AppActivate($target.Id)) { throw 'Could not activate the extension development host window.' }",
-      "Start-Sleep -Milliseconds 500",
-      "$windowRect = New-Object int[] 4",
-      "[void][TestWindow]::GetWindowRect($target.MainWindowHandle, $windowRect)",
-      "$chartX = $windowRect[0] + [int](($windowRect[2] - $windowRect[0]) * 0.6)",
-      "$chartY = $windowRect[1] + [int](($windowRect[3] - $windowRect[1]) * 0.52)",
-      "[void][TestWindow]::SetCursorPos($chartX, $chartY)",
-      "[TestWindow]::mouse_event(0x0800, 0, 0, 1800, [UIntPtr]::Zero)",
-      "Start-Sleep -Milliseconds 500",
-      "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds",
-      "$bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)",
-      "$graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
-      "$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)",
-      `$screenshotPath = '${escapedScreenshotPath}'`,
-      "$bitmap.Save($screenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)",
-      "$graphics.Dispose()",
-      "$bitmap.Dispose()",
-      "Write-Output $screenshotPath",
-    ].join("; ");
-    const captureOutput = execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", captureScript], {
-      encoding: "utf8",
-    });
-    console.log(captureOutput.trim());
+    // VS Code 会把面板 viewType 加上 mainThreadWebview- 之类的前缀，
+    // 这里只比对后缀，否则会白等满 10 秒再误判失败
+    const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+      candidate.input instanceof vscode.TabInputWebview &&
+      candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
 
-    assert.ok(fs.statSync(screenshotPath).size > 10000, "Screenshot should contain the rendered VS Code window");
-    console.log(`FLOWCHART_E2E_SCREENSHOT=${screenshotPath}`);
+    const tab = await waitFor(
+      () =>
+        vscode.window.tabGroups.all
+          .flatMap((group) => group.tabs)
+          .find(isFlowchartPanel),
+      10000
+    );
+    assert.ok(tab, "Flowchart webview panel should open");
+    await vscode.window.tabGroups.close(tab);
   });
 });
