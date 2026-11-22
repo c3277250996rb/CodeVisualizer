@@ -163,7 +163,7 @@ export class GoAstParser extends AbstractParser {
     if (!blockNode) {
       return this.createProcessResult();
     }
-    const statements = blockNode.namedChildren.filter(s => !["line_comment", "block_comment", "comment", "empty_statement", "import_declaration", "package_clause", "type_declaration"].includes(s.type));
+    const statements = blockNode.namedChildren.filter(s => !["empty_statement", "import_declaration", "package_clause", "type_declaration"].includes(s.type));
     return this.processStatementList(statements, exitId, loopContext);
   }
 
@@ -173,10 +173,6 @@ export class GoAstParser extends AbstractParser {
     loopContext?: LoopContext
   ): ProcessResult {
     switch (node.type) {
-      case "comment":
-      case "line_comment":
-      case "block_comment":
-        return this.createProcessResult();
       case "short_var_declaration":
       case "var_declaration":
       case "const_declaration":

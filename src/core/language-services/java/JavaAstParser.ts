@@ -381,8 +381,6 @@ export class JavaAstParser extends AbstractParser {
       // ADDED: Cases to ignore curly braces and other non-statement tokens.
       case "{":
       case "}":
-      case "line_comment":
-      case "block_comment":
         return this.createProcessResult();
 
       case "if_statement":

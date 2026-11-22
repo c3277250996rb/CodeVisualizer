@@ -61,12 +61,17 @@ suite("C flowchart parser", () => {
     assert.strictEqual(flowchart.title, "Flowchart for function: sum_positive");
     assert.ok(flowchart.nodes.some((node) => node.nodeType === NodeType.DECISION));
     assert.ok(flowchart.edges.length > 0);
+    // 注释当成代码识别：函数体里的注释会变成普通语句节点
+    assert.ok(
+      flowchart.nodes.some((node) => node.label.includes("Reject non-positive input")),
+      "body 里的注释应该成为语句节点"
+    );
 
     const mermaid = new EnhancedMermaidGenerator().generate(flowchart);
-    // 注释识别已彻底移除：源码里的注释不应出现在任何节点上
-    assert.ok(!mermaid.includes("code-comment"));
+    assert.ok(!mermaid.includes("code-comment"), "不再有注释专用的渲染块");
+    assert.ok(mermaid.includes("Reject non-positive input"), "注释作为代码出现在节点里");
+    // 函数外的头注释不属于函数体语句，不应该进图
     assert.ok(!mermaid.includes("Function summary."));
-    assert.ok(!mermaid.includes("Reject non-positive input"));
     assert.ok(mermaid.includes(String.fromCodePoint(0x2714, 0xfe0f)));
     assert.ok(mermaid.includes(String.fromCodePoint(0x2716)));
   });

@@ -458,8 +458,6 @@ protected processBlock(
   const statements = blockNode.namedChildren.filter(
     (s) =>
       ![
-        "line_comment",
-        "block_comment",
         "empty_statement",
         "use_declaration",
         "type_item",
@@ -622,8 +620,6 @@ protected processBlock(
   ): ProcessResult {
     if (
       [
-        "line_comment",
-        "block_comment",
         "empty_statement",
         "use_declaration",
         "type_item",

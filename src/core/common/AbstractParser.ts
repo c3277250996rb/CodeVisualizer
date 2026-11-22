@@ -572,11 +572,11 @@ export abstract class AbstractParser {
     }
 
     // Pre-filter statements for better performance
+    // 注释不再过滤：注释当成普通语句参与识别
     const statements = blockNode.namedChildren.filter(
       (s) =>
         ![
           "pass_statement",
-          "comment",
           "elif_clause",
           "else_clause",
           "empty_statement",
