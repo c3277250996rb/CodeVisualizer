@@ -142,6 +142,8 @@ export abstract class BaseFlowchartProvider {
   protected _pinnedUri?: string;
   /** 上次渲染的文档，用于判断是否切换了文件。 */
   protected _lastDocumentUri?: string;
+  /** 上次渲染的函数名，用于判断是否切换了函数（切函数要清画布并重置缩放）。 */
+  protected _lastFunctionName?: string;
   /** 交互期间跳过的刷新，交互结束后补做。 */
   protected _pendingUpdate: boolean = false;
   /** 页面未就绪时挂起的节点聚焦请求。 */
@@ -235,22 +237,29 @@ export abstract class BaseFlowchartProvider {
     // Listen for selection changes in the active editor
     vscode.window.onDidChangeTextEditorSelection(
       async (event) => {
-        if (event.textEditor === vscode.window.activeTextEditor) {
-          const selection = event.selections[0];
-          // If the cursor is still within the same function, just highlight the node
-          if (
-            this._currentFunctionRange &&
-            this._currentFunctionRange.contains(selection)
-          ) {
-            const offset = event.textEditor.document.offsetAt(selection.active);
-            const entry = this._locationMap.find(
-              (e) => offset >= e.start && offset <= e.end
-            );
-            this.highlightNode(entry ? entry.nodeId : null);
-          } else {
-            // If the cursor moves out of the function, regenerate the flowchart
-            await this.updateView(event.textEditor);
-          }
+        // 面板/侧边栏抢到焦点时 activeTextEditor 可能为 undefined，
+        // 所以不能按“是否活动编辑器”过滤，只认这份文档是不是当前渲染的那一份
+        const renderedUri = this._currentDocument?.uri.toString();
+        if (
+          !renderedUri ||
+          event.textEditor.document.uri.toString() !== renderedUri
+        ) {
+          return;
+        }
+        const selection = event.selections[0];
+        // If the cursor is still within the same function, just highlight the node
+        if (
+          this._currentFunctionRange &&
+          this._currentFunctionRange.contains(selection)
+        ) {
+          const offset = event.textEditor.document.offsetAt(selection.active);
+          const entry = this._locationMap.find(
+            (e) => offset >= e.start && offset <= e.end
+          );
+          this.highlightNode(entry ? entry.nodeId : null);
+        } else {
+          // If the cursor moves out of the function, regenerate the flowchart
+          await this.updateView(event.textEditor);
         }
       },
       null,
@@ -601,6 +610,7 @@ export abstract class BaseFlowchartProvider {
     this._webviewReady = false;
     this._lastStructureKey = undefined;
     this._lastDocumentUri = undefined;
+    this._lastFunctionName = undefined;
   }
 
   /**
@@ -781,6 +791,7 @@ export abstract class BaseFlowchartProvider {
       this._htmlRendered = false;
       this._webviewReady = false;
       this._lastStructureKey = undefined;
+      this._lastFunctionName = undefined;
       this._currentDocument = undefined;
       this._currentPosition = undefined;
       return;
@@ -844,6 +855,7 @@ export abstract class BaseFlowchartProvider {
 
       const structureChanged = this._lastStructureKey !== snapshot.structureKey;
       const documentChanged = this._lastDocumentUri !== document.uri.toString();
+      const functionChanged = this._lastFunctionName !== snapshot.ir.functionName;
       if (!this._htmlRendered || !this._webviewReady) {
         // 首次渲染（或 webview 重建）：整页加载一次
         this.setWebviewHtml(
@@ -856,13 +868,15 @@ export abstract class BaseFlowchartProvider {
         );
         this._htmlRendered = true;
       } else {
-        // 后续更新：不重建页面，只推送新的图与附带信息，并保留缩放/位置
+        // 后续更新：不重建页面，只推送新的图与附带信息。
+        // 同一个函数的刷新（编辑回写、主题变化等）保留缩放/位置；
+        // 切换函数或切换文件则必须清空画布、重置缩放，直接显示新函数的全图。
         webview.postMessage({
           command: "applyGraph",
           payload: {
             mermaid: mermaidCode,
-            preserveView: !documentChanged,
-            structureChanged: structureChanged || documentChanged,
+            preserveView: !documentChanged && !functionChanged,
+            structureChanged: structureChanged || documentChanged || functionChanged,
             metrics: snapshot.metrics,
           },
         });
@@ -879,6 +893,7 @@ export abstract class BaseFlowchartProvider {
       });
       this._lastStructureKey = snapshot.structureKey;
       this._lastDocumentUri = document.uri.toString();
+      this._lastFunctionName = snapshot.ir.functionName;
 
       // 挂起的聚焦请求（如图还没画出来时按下的“放大到循环”）在渲染后补发
       this.flushPendingFocus();
@@ -898,6 +913,7 @@ export abstract class BaseFlowchartProvider {
       this._htmlRendered = false;
       this._webviewReady = false;
       this._lastStructureKey = undefined;
+      this._lastFunctionName = undefined;
     } finally {
       this._isUpdating = false;
       if (this._pendingUpdate) {
@@ -1222,6 +1238,39 @@ export abstract class BaseFlowchartProvider {
                 requestAnimationFrame(apply);
             }
 
+            // 切函数/切文件：视口必须回到“整张图刚好铺满”的初始状态
+            function resetViewState() {
+                const apply = () => {
+                    if (!panZoomInstance) {
+                        return;
+                    }
+                    panZoomInstance.resize();
+                    panZoomInstance.fit();
+                    panZoomInstance.center();
+                };
+                apply();
+                requestAnimationFrame(apply);
+            }
+
+            // 清空画布：旧图的 svg、pan/zoom 实例、高亮状态全部丢掉，
+            // 避免切换函数的那一瞬间还残留上一个函数的节点
+            function clearCanvas(mermaidDiv, sourceDiv) {
+                if (panZoomInstance) {
+                    try {
+                        panZoomInstance.destroy();
+                    } catch (error) {
+                        console.warn('[CodeVisualizer] destroy pan/zoom failed:', error);
+                    }
+                    panZoomInstance = null;
+                }
+                mermaidDiv.replaceChildren();
+                mermaidDiv.removeAttribute('data-processed');
+                if (sourceDiv) {
+                    sourceDiv.textContent = '';
+                }
+                highlightedNodeId = null;
+            }
+
             function updateLlmToggle(llmApplied) {
                 try {
                     if (llmApplied === undefined) {
@@ -1240,7 +1289,7 @@ export abstract class BaseFlowchartProvider {
                 }
             }
 
-            // 统一的图渲染入口：先记录视口，重渲染后恢复
+            // 统一的图渲染入口：同一函数刷新保留视口；切函数/切文件先清空画布再重置视口
             function renderGraphSource(newSource, options) {
                 const mermaidDiv = document.querySelector('.mermaid');
                 const sourceDiv = document.getElementById('mermaid-source');
@@ -1248,16 +1297,22 @@ export abstract class BaseFlowchartProvider {
                     return;
                 }
                 const opts = options || {};
-                const state = opts.preserveView ? captureViewState() : null;
+                const keepView = !!opts.preserveView;
+                const state = keepView ? captureViewState() : null;
 
                 const idx = newSource.toLowerCase().indexOf('graph ');
                 const finalSrc = idx >= 0 ? newSource.slice(idx) : newSource;
 
-                const existingSvg = mermaidDiv.querySelector('svg');
-                if (existingSvg) {
-                    existingSvg.remove();
+                if (keepView) {
+                    const existingSvg = mermaidDiv.querySelector('svg');
+                    if (existingSvg) {
+                        existingSvg.remove();
+                    }
+                    mermaidDiv.removeAttribute('data-processed');
+                } else {
+                    // 切函数/切文件：先把上一个函数的图彻底清掉，再画新的
+                    clearCanvas(mermaidDiv, sourceDiv);
                 }
-                mermaidDiv.removeAttribute('data-processed');
                 mermaidDiv.textContent = finalSrc;
                 sourceDiv.textContent = newSource.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -1279,7 +1334,11 @@ export abstract class BaseFlowchartProvider {
                                         hl.classList.add('highlighted');
                                     }
                                 }
-                                restoreViewState(state);
+                                if (state) {
+                                    restoreViewState(state);
+                                } else {
+                                    resetViewState();
+                                }
                             } else if (attempts < 20) {
                                 attempts += 1;
                                 setTimeout(checkAndSetup, 100);

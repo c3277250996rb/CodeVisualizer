@@ -29,16 +29,27 @@ suite("C flowchart parser", () => {
   const PARSER_TEST = "generates a flowchart for the commented C sample";
   const SMOKE_TEST = "opens MyAdc_SendTelemetry and zooms into the loop";
   const VARS_TEST = "VARS 变量面板跟随函数与文件刷新";
+  const SWITCH_TEST = "SWITCH 切函数时清空画布并重置缩放";
 
   suiteSetup(async () => {
-    if (!selected(PARSER_TEST) && !selected(SMOKE_TEST) && !selected(VARS_TEST)) {
+    if (
+      !selected(PARSER_TEST) &&
+      !selected(SMOKE_TEST) &&
+      !selected(VARS_TEST) &&
+      !selected(SWITCH_TEST)
+    ) {
       return;
     }
     const wasmPath = path.join(__dirname, "../../dist/tree-sitter-c.wasm");
     parser = await CAstParser.create(wasmPath);
   });
 
-  if (!selected(PARSER_TEST) && !selected(SMOKE_TEST) && !selected(VARS_TEST)) {
+  if (
+    !selected(PARSER_TEST) &&
+    !selected(SMOKE_TEST) &&
+    !selected(VARS_TEST) &&
+    !selected(SWITCH_TEST)
+  ) {
     test("filter matched no tests", () => {
       assert.fail(`CODEVISUALIZER_TEST_ONLY="${ONLY}" 没有匹配的用例`);
     });
@@ -230,6 +241,85 @@ suite("C flowchart parser", () => {
       motorEditor.selection = new vscode.Selection(motorPosition, motorPosition);
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // 切函数：画布必须清空重画、缩放回到整图（不能把上一个函数放大后的视口带过来）
+  if (selected(SWITCH_TEST)) {
+    test(SWITCH_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板，实拍才看得清
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      const adcPath = path.join(__dirname, "../../test-files/my_adc.c");
+      const adcText = require("fs").readFileSync(adcPath, "utf8") as string;
+
+      // 1) L2 断言：两个函数的图源确实不同（第一个函数有 for/while，第二个没有）
+      const flowA = parser.generateFlowchart(adcText, "MyAdc_SendTelemetry");
+      const flowB = parser.generateFlowchart(adcText, "MyAdc_StartConversion");
+      const mermaidA = new EnhancedMermaidGenerator().generate(flowA);
+      const mermaidB = new EnhancedMermaidGenerator().generate(flowB);
+      assert.ok(mermaidA.includes("for_init_"), "SendTelemetry 的图里应有 for 循环节点");
+      assert.ok(mermaidA.includes("end loop"), "SendTelemetry 的图里应有循环收尾节点");
+      assert.ok(!mermaidB.includes("for_init_"), "StartConversion 的图里不该有 for 循环节点");
+      assert.notStrictEqual(mermaidA, mermaidB, "两个函数必须产出不同的图源");
+
+      // 2) 打开编辑器 + 把图表面板开到侧边（不改编辑器所在列，编辑器对象一直有效）
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(adcPath));
+      let editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const firstFunction = document.getText().indexOf("MyAdc_SendTelemetry");
+      const firstPosition = document.positionAt(firstFunction);
+      editor.selection = new vscode.Selection(firstPosition, firstPosition);
+
+      await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+      const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+      const tab = await waitFor(
+        () =>
+          vscode.window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .find(isFlowchartPanel),
+        10000
+      );
+      assert.ok(tab, "Flowchart webview panel should open");
+
+      // 3) 视觉证据一：先放大到循环，画面变成局部大图
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await vscode.commands.executeCommand("codevisualizer.focusLoopNode");
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // 4) 视觉证据二：光标切到另一个函数 → 画布清空重画 + 缩放回到整图
+      const secondFunction = document.getText().indexOf("MyAdc_StartConversion");
+      assert.ok(secondFunction > firstFunction, "样例里应能找到第二个函数");
+      // 面板抢焦点后重新把这个编辑器唤回可见，选区变更才会真正派发
+      editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const secondPosition = document.positionAt(secondFunction);
+      editor.selection = new vscode.Selection(secondPosition, secondPosition);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      await vscode.window.tabGroups.close(tab);
       await tryCommand("workbench.action.toggleFullScreen");
     });
   }
