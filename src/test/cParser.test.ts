@@ -33,6 +33,7 @@ suite("C flowchart parser", () => {
   const ELSE_TEST = "ELSE else 与 else if 要识别成判断分支";
   const LOOPBODY_TEST = "LOOPBODY while 与 do-while 的循环体要逐条展开";
   const ESCAPE_TEST = "ESCAPE 代码里的 != 与反斜杠要原样显示";
+  const OUTLINE_TEST = "OUTLINE 侧边栏只剩流程图视图";
 
   const ANY_TEST = (): boolean =>
     selected(PARSER_TEST) ||
@@ -41,7 +42,8 @@ suite("C flowchart parser", () => {
     selected(SWITCH_TEST) ||
     selected(ELSE_TEST) ||
     selected(LOOPBODY_TEST) ||
-    selected(ESCAPE_TEST);
+    selected(ESCAPE_TEST) ||
+    selected(OUTLINE_TEST);
 
   suiteSetup(async () => {
     if (!ANY_TEST()) {
@@ -720,6 +722,64 @@ suite("C flowchart parser", () => {
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
       await vscode.window.tabGroups.close(tab);
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // 侧边栏只保留流程图视图：Outline 树与它的跳转命令都已删除
+  if (selected(OUTLINE_TEST)) {
+    test(OUTLINE_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      // 1) L3：清单里 codevisualizer-container 只剩 flowchartView
+      const contributes = (extension.packageJSON as { contributes?: { views?: Record<string, { id: string }[]> } })
+        .contributes;
+      const containerViews = contributes?.views?.["codevisualizer-container"] ?? [];
+      assert.deepStrictEqual(
+        containerViews.map((view) => view.id),
+        ["codevisualizer.flowchartView"],
+        "CodeVisualizer 容器只能声明流程图这一个视图"
+      );
+
+      // 2) L3：导航命令已经不存在
+      const commands = await vscode.commands.getCommands(true);
+      assert.ok(
+        !commands.includes("codevisualizer.revealOutlineNode"),
+        "revealOutlineNode 命令必须随 Outline 一起删除"
+      );
+
+      // 3) L4：打开侧边栏，画面里只有 Flowchart，没有 Outline 分区
+      const adcPath = path.join(__dirname, "../../test-files/escape_sample.c");
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(adcPath));
+      const editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const fnPosition = document.getText().indexOf("escape_sample");
+      const cursor = document.positionAt(Math.max(fnPosition, 0));
+      editor.selection = new vscode.Selection(cursor, cursor);
+
+      await tryCommand("codevisualizer.flowchartView.focus");
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
       await tryCommand("workbench.action.toggleFullScreen");
     });
   }
