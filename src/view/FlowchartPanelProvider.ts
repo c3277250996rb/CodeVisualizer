@@ -105,6 +105,9 @@ export class FlowchartPanelProvider extends BaseFlowchartProvider {
       dark: vscode.Uri.joinPath(this._extensionUri, "media", "icon.svg"),
     };
 
+    // 新面板需要重新走一次整页渲染
+    this.resetWebviewState();
+
     this._panel.onDidDispose(
       () => {
         this._panel = undefined;

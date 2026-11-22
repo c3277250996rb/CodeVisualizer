@@ -46,6 +46,8 @@ export class FlowchartViewProvider
     _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
+    // 新的 webview 需要重新走一次整页渲染
+    this.resetWebviewState();
     
     const baseOptions = {
       enableScripts: true,

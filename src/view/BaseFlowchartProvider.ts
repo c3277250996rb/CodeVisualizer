@@ -1,11 +1,16 @@
 import * as vscode from "vscode";
 import { analyzeCode } from "../core/analyzer";
-import { LocationMapEntry } from "../ir/ir";
+import { FlowchartIR, LocationMapEntry } from "../ir/ir";
 import { EnhancedMermaidGenerator } from "../core/EnhancedMermaidGenerator";
 import { LLMManager } from "../core/llm/LLMManager";
 import { getExtensionContext } from "../core/llm/LLMContext";
 import { EnvironmentDetector } from "../core/utils/EnvironmentDetector";
 import { MetricsAnalyzer, CodeMetrics } from "../core/utils/MetricsAnalyzer";
+import {
+  buildStructureKey,
+  DocumentModel,
+  DocumentSnapshot,
+} from "../core/document/DocumentModel";
 
 const MERMAID_VERSION = "11.8.0";
 const SVG_PAN_ZOOM_VERSION = "3.6.1";
@@ -62,6 +67,21 @@ export type UserInteractionEndMessage = {
   payload: {};
 };
 
+export type WebviewReadyMessage = {
+  command: "webviewReady";
+  payload: {};
+};
+
+export type RequestFunctionMessage = {
+  command: "requestFunction";
+  payload: { name?: string };
+};
+
+export type EditStatementMessage = {
+  command: "editStatement";
+  payload: { start: number; end: number; text: string; original?: string };
+};
+
 export type WebviewMessage =
   | HighlightCodeMessage
   | ExportMessage
@@ -72,7 +92,10 @@ export type WebviewMessage =
   | DisableLLMLabelsMessage
   | SetupLLMMessage
   | UserInteractionStartMessage
-  | UserInteractionEndMessage;
+  | UserInteractionEndMessage
+  | WebviewReadyMessage
+  | RequestFunctionMessage
+  | EditStatementMessage;
 
 export interface FlowchartViewContext {
   isPanel: boolean;
@@ -89,6 +112,8 @@ export abstract class BaseFlowchartProvider {
   protected _currentFunctionRange: vscode.Range | undefined;
   protected _debounceTimer?: NodeJS.Timeout;
   protected _currentDocument?: vscode.TextDocument;
+  /** 最近一次渲染时的文档版本；TextDocument 是活对象，必须单独记版本号。 */
+  protected _currentVersion?: number;
   protected _currentPosition?: number;
   protected _isUpdating: boolean = false;
   protected _eventListenersSetup: boolean = false;
@@ -96,6 +121,20 @@ export abstract class BaseFlowchartProvider {
   protected _mermaidCodeLLM?: string;
   private _cachedClickHandlers?: { source: string; lines: string[] };
   protected _userInteracting: boolean = false;
+  /** 分析快照缓存，避免同一版本重复解析。 */
+  protected _documentModel: DocumentModel = new DocumentModel();
+  /** 页面是否已经完整渲染过一次（之后只推消息）。 */
+  protected _htmlRendered: boolean = false;
+  /** webview 脚本是否已就绪（握手完成后才能安全地推消息）。 */
+  protected _webviewReady: boolean = false;
+  /** 上一次渲染的图结构签名，用于判断布局是否会变。 */
+  protected _lastStructureKey?: string;
+  /** 固定展示的函数名；为空时跟随光标。 */
+  protected _pinnedFunction?: string;
+  /** 上次渲染的文档，用于判断是否切换了文件。 */
+  protected _lastDocumentUri?: string;
+  /** 交互期间跳过的刷新，交互结束后补做。 */
+  protected _pendingUpdate: boolean = false;
 
   constructor(protected readonly _extensionUri: vscode.Uri) {
     // Detect environment and apply any necessary compatibility fixes
@@ -210,16 +249,25 @@ export abstract class BaseFlowchartProvider {
     // Listen for changes to the document text for live updates
     vscode.workspace.onDidChangeTextDocument(
       (event) => {
-        if (event.document === vscode.window.activeTextEditor?.document) {
-          // Clear the previous timer if it exists
-          if (this._debounceTimer) {
-            clearTimeout(this._debounceTimer);
-          }
-          // Set a new timer to update the view after a short delay (e.g., 500ms)
-          this._debounceTimer = setTimeout(() => {
-            this.updateView(vscode.window.activeTextEditor);
-          }, 500);
+        // 只响应当前渲染的那份文档；不看焦点，面板抢焦点时也要能刷新
+        const renderedUri = this._currentDocument?.uri.toString();
+        if (!renderedUri || event.document.uri.toString() !== renderedUri) {
+          return;
         }
+        if (event.contentChanges.length === 0) {
+          return;
+        }
+
+        if (this._debounceTimer) {
+          clearTimeout(this._debounceTimer);
+        }
+        this._debounceTimer = setTimeout(() => {
+          const editor =
+            vscode.window.visibleTextEditors.find(
+              (candidate) => candidate.document.uri.toString() === renderedUri
+            ) ?? vscode.window.activeTextEditor;
+          this.updateView(editor);
+        }, 300);
       },
       null,
       this._disposables
@@ -305,6 +353,34 @@ export abstract class BaseFlowchartProvider {
 
       case "userInteractionEnd": {
         this._userInteracting = false;
+        if (this._pendingUpdate) {
+          this._pendingUpdate = false;
+          const uri = this._currentDocument?.uri.toString();
+          const editor = uri
+            ? vscode.window.visibleTextEditors.find(
+                (candidate) => candidate.document.uri.toString() === uri
+              ) ?? vscode.window.activeTextEditor
+            : vscode.window.activeTextEditor;
+          await this.updateView(editor);
+        }
+        break;
+      }
+
+      case "webviewReady": {
+        // 页面脚本就绪后，后续更新才能安全地走消息通道
+        this._webviewReady = true;
+        break;
+      }
+
+      case "requestFunction": {
+        this._pinnedFunction = message.payload.name;
+        this._documentModel.invalidate();
+        await this.updateView(vscode.window.activeTextEditor);
+        break;
+      }
+
+      case "editStatement": {
+        await this.handleEditStatement(message.payload);
         break;
       }
     }
@@ -460,6 +536,135 @@ export abstract class BaseFlowchartProvider {
   }
 
   /**
+   * webview 被重建时调用，恢复“首次整页渲染”的流程。
+   */
+  public resetWebviewState(): void {
+    this._documentModel.invalidate();
+    this._htmlRendered = false;
+    this._webviewReady = false;
+    this._lastStructureKey = undefined;
+    this._lastDocumentUri = undefined;
+  }
+
+  /**
+   * 取分析快照：同一文档版本直接命中缓存，不重复解析。
+   */
+  private async getSnapshot(
+    document: vscode.TextDocument,
+    position: number
+  ): Promise<DocumentSnapshot> {
+    const uri = document.uri.toString();
+    const cached = this._documentModel.get(
+      uri,
+      document.version,
+      this._pinnedFunction
+    );
+    if (cached) {
+      return cached;
+    }
+
+    const ir = await analyzeCode(
+      document.getText(),
+      document.languageId,
+      this._pinnedFunction,
+      position
+    );
+
+    const snapshot: DocumentSnapshot = {
+      uri,
+      version: document.version,
+      languageId: document.languageId,
+      functionName: this._pinnedFunction,
+      ir,
+      metrics: MetricsAnalyzer.analyze(ir, document.getText()),
+      headerComment: ir.headerComment,
+      structureKey: buildStructureKey(ir),
+    };
+    this._documentModel.store(snapshot);
+    return snapshot;
+  }
+
+  /**
+   * 按当前主题生成 Mermaid 代码。
+   */
+  private generateMermaid(ir: FlowchartIR): string {
+    const vsCodeTheme =
+      vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark
+        ? "dark"
+        : "light";
+    const config = vscode.workspace.getConfiguration("codevisualizer");
+    const selectedTheme = config.get<string>("theme", "monokai");
+    return new EnhancedMermaidGenerator(selectedTheme, vsCodeTheme).generate(ir);
+  }
+
+  /**
+   * 把 webview 中编辑过的语句写回源码。
+   * 写入前校验目标位置的原文，避免文档已变化时写错行。
+   */
+  private async handleEditStatement(payload: {
+    start: number;
+    end: number;
+    text: string;
+    original?: string;
+  }): Promise<void> {
+    const webview = this.getWebview();
+    const document = this._currentDocument ?? vscode.window.activeTextEditor?.document;
+
+    if (!webview || !document) {
+      webview?.postMessage({
+        command: "editResult",
+        payload: { ok: false, reason: "no-document" },
+      });
+      return;
+    }
+
+    const text = payload.text ?? "";
+    if (payload.original !== undefined && text === payload.original) {
+      webview.postMessage({
+        command: "editResult",
+        payload: { ok: true, changed: false },
+      });
+      return;
+    }
+
+    let start = payload.start;
+    let end = payload.end;
+    const rangeText = document.getText(
+      new vscode.Range(document.positionAt(start), document.positionAt(end))
+    );
+
+    if (payload.original !== undefined && rangeText !== payload.original) {
+      // 文档已变化：在附近重新定位原文，找不到则拒绝写入
+      const fullText = document.getText();
+      const searchFrom = Math.max(0, start - 2000);
+      const index = payload.original.length > 0
+        ? fullText.indexOf(payload.original, searchFrom)
+        : -1;
+      if (index < 0 || index > start + 2000) {
+        webview.postMessage({
+          command: "editResult",
+          payload: { ok: false, reason: "stale" },
+        });
+        return;
+      }
+      start = index;
+      end = index + payload.original.length;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      document.uri,
+      new vscode.Range(document.positionAt(start), document.positionAt(end)),
+      text
+    );
+    const applied = await vscode.workspace.applyEdit(edit);
+    webview.postMessage({
+      command: "editResult",
+      payload: { ok: applied, reason: applied ? undefined : "apply-failed" },
+    });
+  }
+
+  /**
    * Force update the view, ignoring the shouldUpdate check
    */
   public async forceUpdateView(
@@ -470,8 +675,13 @@ export abstract class BaseFlowchartProvider {
 
     // Clear current state to force regeneration
     this._currentDocument = undefined;
+    this._currentVersion = undefined;
     this._currentPosition = undefined;
     this._currentFunctionRange = undefined;
+
+    if (editor) {
+      this._documentModel.invalidate(editor.document.uri.toString());
+    }
 
     await this.updateView(editor);
   }
@@ -489,6 +699,7 @@ export abstract class BaseFlowchartProvider {
 
     // Prevent updates when user is interacting with the webview
     if (this._userInteracting) {
+      this._pendingUpdate = true;
       return;
     }
 
@@ -501,6 +712,9 @@ export abstract class BaseFlowchartProvider {
       this.setWebviewHtml(
         this.getLoadingHtml("Please open a file to see the flowchart.")
       );
+      this._htmlRendered = false;
+      this._webviewReady = false;
+      this._lastStructureKey = undefined;
       this._currentDocument = undefined;
       this._currentPosition = undefined;
       return;
@@ -526,61 +740,66 @@ export abstract class BaseFlowchartProvider {
     }
 
     this._isUpdating = true;
-    this.setWebviewHtml(this.getLoadingHtml("Generating flowchart..."));
+    if (!this._htmlRendered) {
+      this.setWebviewHtml(this.getLoadingHtml("Generating flowchart..."));
+    }
 
     try {
-      const flowchartIR = await analyzeCode(
-        document.getText(),
-        document.languageId,
-        undefined,
-        position
-      );
+      const snapshot = await this.getSnapshot(document, position);
 
-      this._locationMap = flowchartIR.locationMap;
+      this._locationMap = snapshot.ir.locationMap;
       this._currentDocument = document;
+      this._currentVersion = document.version;
       this._currentPosition = position;
 
-      if (flowchartIR.functionRange) {
+      if (snapshot.ir.functionRange) {
         this._currentFunctionRange = new vscode.Range(
-          document.positionAt(flowchartIR.functionRange.start),
-          document.positionAt(flowchartIR.functionRange.end)
+          document.positionAt(snapshot.ir.functionRange.start),
+          document.positionAt(snapshot.ir.functionRange.end)
         );
       } else {
         this._currentFunctionRange = undefined;
       }
 
-      // Generate Mermaid diagram from FlowchartIR with enhanced styling
-      const vsCodeTheme =
-        vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark
-          ? "dark"
-          : "light";
-
-      // Read the selected theme from user configuration
-      const config = vscode.workspace.getConfiguration("codevisualizer");
-      const selectedTheme = config.get<string>(
-        "theme",
-        "monokai"
-      );
-
-      const mermaidGenerator = new EnhancedMermaidGenerator(
-        selectedTheme,
-        vsCodeTheme
-      );
-      const mermaidCode = mermaidGenerator.generate(flowchartIR);
+      const mermaidCode = this.generateMermaid(snapshot.ir);
       this._mermaidCodeOriginal = mermaidCode;
       this._mermaidCodeLLM = undefined;
-      // Calculate code metrics
-      const codeMetrics = MetricsAnalyzer.analyze(flowchartIR, document.getText());
 
       const ctx = getExtensionContext();
-      const availability = ctx ? await LLMManager.getAvailability(ctx) : { enabled: false, provider: "openai", model: "" };
-      this.setWebviewHtml(this.getWebviewContent(
-        mermaidCode,
-        this.getNonce(),
-        availability,
-        codeMetrics,
-        flowchartIR.headerComment
-      ));
+      const availability = ctx
+        ? await LLMManager.getAvailability(ctx)
+        : { enabled: false, provider: "openai", model: "" };
+
+      const structureChanged = this._lastStructureKey !== snapshot.structureKey;
+      const documentChanged = this._lastDocumentUri !== document.uri.toString();
+      if (!this._htmlRendered || !this._webviewReady) {
+        // 首次渲染（或 webview 重建）：整页加载一次
+        this.setWebviewHtml(
+          this.getWebviewContent(
+            mermaidCode,
+            this.getNonce(),
+            availability,
+            snapshot.metrics,
+            snapshot.headerComment
+          )
+        );
+        this._htmlRendered = true;
+      } else {
+        // 后续更新：不重建页面，只推送新的图与附带信息，并保留缩放/位置
+        webview.postMessage({
+          command: "applyGraph",
+          payload: {
+            mermaid: mermaidCode,
+            preserveView: !documentChanged,
+            structureChanged: structureChanged || documentChanged,
+            metrics: snapshot.metrics,
+            headerComment: snapshot.headerComment ?? "",
+          },
+        });
+        webview.postMessage({ command: "llmAvailability", payload: availability });
+      }
+      this._lastStructureKey = snapshot.structureKey;
+      this._lastDocumentUri = document.uri.toString();
 
       // After updating the view, immediately highlight the node for the current cursor
       const offset = editor.document.offsetAt(editor.selection.active);
@@ -594,6 +813,9 @@ export abstract class BaseFlowchartProvider {
       const errorMessage =
         error instanceof Error ? error.message : "An unknown error occurred";
       this.setWebviewHtml(this.getLoadingHtml(`Error: ${errorMessage}`));
+      this._htmlRendered = false;
+      this._webviewReady = false;
+      this._lastStructureKey = undefined;
     } finally {
       this._isUpdating = false;
     }
@@ -617,7 +839,7 @@ export abstract class BaseFlowchartProvider {
     }
 
     // Update if document version changed (content was modified)
-    if (this._currentDocument.version !== document.version) {
+    if (this._currentVersion !== document.version) {
       return true;
     }
 
@@ -653,15 +875,17 @@ export abstract class BaseFlowchartProvider {
     const context = this.getViewContext();
 
     const llm = llmAvailability || { enabled: false, provider: "openai", model: "" };
-    const headerCommentPanel = headerComment
-      ? `<div id="function-comment" tabindex="0">${headerComment.replace(/[&<>"']/g, (character) => ({
+    const escapedHeaderComment = headerComment
+      ? headerComment.replace(/[&<>"']/g, (character) => ({
           "&": "&amp;",
           "<": "&lt;",
           ">": "&gt;",
           '"': "&quot;",
           "'": "&#39;",
-        })[character]!)}</div>`
+        })[character]!)
       : "";
+    // 容器常驻，后续通过消息更新内容与显隐
+    const headerCommentPanel = `<div id="function-comment" tabindex="0"${escapedHeaderComment ? "" : ' style="display:none"'}>${escapedHeaderComment}</div>`;
     return `<!DOCTYPE html>
     <html lang="en">
     <head>
@@ -865,6 +1089,187 @@ export abstract class BaseFlowchartProvider {
             }
 
             let highlightedNodeId = null;
+            // 重渲染后复用的 pan/zoom 实例
+            let panZoomInstance = null;
+
+            function applyHeaderComment(text) {
+                const el = document.getElementById('function-comment');
+                if (!el) {
+                    return;
+                }
+                el.textContent = text || '';
+                el.style.display = text ? '' : 'none';
+            }
+
+            function applyMetricsToPanel(metrics) {
+                if (!metrics) {
+                    return;
+                }
+                const values = document.querySelectorAll('#metrics-panel .metrics-value');
+                const nums = [
+                    metrics.linesOfCode,
+                    metrics.numberOfNodes,
+                    metrics.numberOfEdges,
+                    metrics.decisionPoints,
+                    metrics.returnStatements,
+                    metrics.functionParameters,
+                ];
+                values.forEach((el, index) => {
+                    if (index < nums.length) {
+                        el.textContent = String(nums[index]);
+                    }
+                });
+            }
+
+            // 记录当前视口：缩放、pan，以及离视口中心最近的节点及其相对偏移
+            function captureViewState() {
+                if (!panZoomInstance) {
+                    return null;
+                }
+                const svg = document.querySelector('.mermaid svg');
+                if (!svg) {
+                    return null;
+                }
+                const zoom = panZoomInstance.getZoom();
+                const pan = panZoomInstance.getPan();
+                const vb = svg.getBoundingClientRect();
+                const centerX = vb.left + vb.width / 2;
+                const centerY = vb.top + vb.height / 2;
+                let anchorId = null;
+                let anchorOffset = null;
+                let best = Infinity;
+                svg.querySelectorAll('.node').forEach((node) => {
+                    const r = node.getBoundingClientRect();
+                    const dx = (r.left + r.width / 2) - centerX;
+                    const dy = (r.top + r.height / 2) - centerY;
+                    const distance = Math.hypot(dx, dy);
+                    if (distance < best) {
+                        best = distance;
+                        anchorId = node.id;
+                        anchorOffset = { x: dx, y: dy };
+                    }
+                });
+                return { zoom, pan, anchorNodeId: anchorId, anchorOffset };
+            }
+
+            // 重渲染后恢复视口：结构未变时直接还原 pan；结构变了则按锚点节点重新定位
+            function restoreViewState(state, structureChanged) {
+                if (!panZoomInstance || !state) {
+                    return;
+                }
+                panZoomInstance.zoom(state.zoom);
+                if (!structureChanged && state.pan) {
+                    panZoomInstance.pan(state.pan);
+                    return;
+                }
+                const anchorNode = state.anchorNodeId ? document.getElementById(state.anchorNodeId) : null;
+                if (!anchorNode) {
+                    panZoomInstance.center();
+                    return;
+                }
+                const svg = document.querySelector('.mermaid svg');
+                if (!svg) {
+                    return;
+                }
+                const vb = svg.getBoundingClientRect();
+                const targetX = vb.left + vb.width / 2 + (state.anchorOffset ? state.anchorOffset.x : 0);
+                const targetY = vb.top + vb.height / 2 + (state.anchorOffset ? state.anchorOffset.y : 0);
+                let attempts = 0;
+                const centerAnchor = () => {
+                    const r = anchorNode.getBoundingClientRect();
+                    const dx = targetX - (r.left + r.width / 2);
+                    const dy = targetY - (r.top + r.height / 2);
+                    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) {
+                        return true;
+                    }
+                    const pan = panZoomInstance.getPan();
+                    panZoomInstance.pan({ x: pan.x + dx, y: pan.y + dy });
+                    return false;
+                };
+                const step = () => {
+                    attempts += 1;
+                    if (centerAnchor() || attempts >= 3) {
+                        return;
+                    }
+                    requestAnimationFrame(step);
+                };
+                requestAnimationFrame(step);
+            }
+
+            function updateLlmToggle(llmApplied) {
+                try {
+                    if (llmApplied === undefined) {
+                        return;
+                    }
+                    isLLMEnabled = !!llmApplied;
+                    localStorage.setItem('codevisualizer-llm-enabled', llmApplied ? 'true' : 'false');
+                    const llmToggle = document.getElementById('llm-toggle');
+                    if (llmToggle) {
+                        llmToggle.textContent = llmApplied ? '✓ LLM' : 'LLM';
+                        llmToggle.title = llmApplied ? 'Disable LLM labels' : 'Enable LLM labels';
+                        llmToggle.removeAttribute('disabled');
+                    }
+                } catch (error) {
+                    console.warn('[CodeVisualizer] Unable to persist LLM state:', error);
+                }
+            }
+
+            // 统一的图渲染入口：先记录视口，重渲染后恢复
+            function renderGraphSource(newSource, options) {
+                const mermaidDiv = document.querySelector('.mermaid');
+                const sourceDiv = document.getElementById('mermaid-source');
+                if (!mermaidDiv || !sourceDiv) {
+                    return;
+                }
+                const opts = options || {};
+                const state = opts.preserveView ? captureViewState() : null;
+
+                const idx = newSource.toLowerCase().indexOf('graph ');
+                const finalSrc = idx >= 0 ? newSource.slice(idx) : newSource;
+
+                const existingSvg = mermaidDiv.querySelector('svg');
+                if (existingSvg) {
+                    existingSvg.remove();
+                }
+                mermaidDiv.removeAttribute('data-processed');
+                mermaidDiv.textContent = finalSrc;
+                sourceDiv.textContent = newSource.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+                const run = async () => {
+                    try {
+                        if (typeof mermaid.run === 'function') {
+                            await mermaid.run({ querySelector: '.mermaid' });
+                        } else if (typeof mermaid.init === 'function') {
+                            mermaid.init(undefined, '.mermaid');
+                        }
+                        let attempts = 0;
+                        const checkAndSetup = () => {
+                            const svgElement = document.querySelector('.mermaid svg');
+                            if (svgElement) {
+                                setupInteractions(svgElement);
+                                if (highlightedNodeId) {
+                                    const hl = document.getElementById(highlightedNodeId);
+                                    if (hl) {
+                                        hl.classList.add('highlighted');
+                                    }
+                                }
+                                restoreViewState(state, !!opts.structureChanged);
+                            } else if (attempts < 20) {
+                                attempts += 1;
+                                setTimeout(checkAndSetup, 100);
+                            } else {
+                                console.warn('[CodeVisualizer] SVG not found after mermaid re-render');
+                            }
+                        };
+                        checkAndSetup();
+                    } catch (error) {
+                        console.error('[CodeVisualizer] Error re-rendering mermaid:', error);
+                    }
+                };
+                run();
+
+                updateLlmToggle(opts.llmApplied);
+            }
 
             window.addEventListener('message', event => {
                 const message = event.data;
@@ -889,84 +1294,32 @@ export abstract class BaseFlowchartProvider {
                         }
                         break;
 
+                    case 'applyGraph':
                     case 'applyMermaid': {
-                        const mermaidDiv = document.querySelector('.mermaid');
-                        const sourceDiv = document.getElementById('mermaid-source');
-                        if (mermaidDiv && sourceDiv) {
-                            const newSource = message.payload.mermaid;
-                            
-                            // Clear existing SVG first
-                            const existingSvg = mermaidDiv.querySelector('svg');
-                            if (existingSvg) {
-                                existingSvg.remove();
-                            }
-                            
-                            // Reset processed state to allow re-render
-                            mermaidDiv.removeAttribute('data-processed');
-                            
-                            // Ensure it starts with a valid graph header
-                            const idx = newSource.toLowerCase().indexOf('graph ');
-                            const finalSrc = idx >= 0 ? newSource.slice(idx) : newSource;
-                            
-                            // Update source
-                            mermaidDiv.textContent = finalSrc;
-                            sourceDiv.textContent = newSource.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                            
-                            // Re-run mermaid rendering (Mermaid v11 API)
-                            const renderMermaid = async () => {
-                                try {
-                                    if (typeof mermaid.run === 'function') {
-                                        await mermaid.run({ querySelector: '.mermaid' });
-                                    } else if (typeof mermaid.init === 'function') {
-                                        // Fallback for older API
-                                        mermaid.init(undefined, '.mermaid');
-                                    }
-                                    
-                                    // Wait for SVG to be rendered, then setup interactions
-                                    let attempts = 0;
-                                    const maxAttempts = 20; // Wait up to 2 seconds
-                                    const checkAndSetup = () => {
-                                        const svgElement = document.querySelector('.mermaid svg');
-                                        if (svgElement) {
-                                            setupInteractions(svgElement);
-                                        } else if (attempts < maxAttempts) {
-                                            attempts++;
-                                            setTimeout(checkAndSetup, 100);
-                                        } else {
-                                            console.warn('[CodeVisualizer] SVG not found after mermaid re-render');
-                                        }
-                                    };
-                                    checkAndSetup();
-                                } catch (error) {
-                                    console.error('[CodeVisualizer] Error re-rendering mermaid:', error);
-                                }
-                            };
-                            
-                            renderMermaid();
-                            
-                            // Mark LLM enabled only after a successful apply if requested
-                            try {
-                                if (message.payload && message.payload.llmApplied) {
-                                    isLLMEnabled = true;
-                                    localStorage.setItem('codevisualizer-llm-enabled', 'true');
-                                    const llmToggle = document.getElementById('llm-toggle');
-                                    if (llmToggle) {
-                                        llmToggle.textContent = '✓ LLM';
-                                        llmToggle.title = 'Disable LLM labels';
-                                        llmToggle.removeAttribute('disabled');
-                                    }
-                                } else {
-                                    // If this was a disable request, ensure state reflects disabled
-                                    isLLMEnabled = false;
-                                    localStorage.setItem('codevisualizer-llm-enabled', 'false');
-                                    const llmToggle = document.getElementById('llm-toggle');
-                                    if (llmToggle) {
-                                        llmToggle.textContent = 'LLM';
-                                        llmToggle.title = 'Enable LLM labels';
-                                        llmToggle.removeAttribute('disabled');
-                                    }
-                                }
-                            } catch {}
+                        renderGraphSource(message.payload.mermaid, {
+                            preserveView: message.payload.preserveView !== false,
+                            structureChanged: message.payload.structureChanged !== false,
+                            llmApplied: typeof message.payload.llmApplied === 'boolean' ? message.payload.llmApplied : undefined,
+                        });
+                        if (message.payload.metrics) {
+                            applyMetricsToPanel(message.payload.metrics);
+                        }
+                        if (typeof message.payload.headerComment === 'string') {
+                            applyHeaderComment(message.payload.headerComment);
+                        }
+                        break;
+                    }
+                    case 'applyHeaderComment': {
+                        applyHeaderComment(message.payload.text || '');
+                        break;
+                    }
+                    case 'applyMetrics': {
+                        applyMetricsToPanel(message.payload.metrics);
+                        break;
+                    }
+                    case 'editResult': {
+                        if (!message.payload.ok) {
+                            console.warn('[CodeVisualizer] edit rejected:', message.payload.reason);
                         }
                         break;
                     }
@@ -1106,7 +1459,15 @@ export abstract class BaseFlowchartProvider {
                     }, 300);
                 }
 
-                const panZoomInstance = svgPanZoom(svgElement, {
+                if (panZoomInstance) {
+                    try {
+                        panZoomInstance.destroy();
+                    } catch (error) {
+                        console.warn('[CodeVisualizer] destroy pan/zoom failed:', error);
+                    }
+                    panZoomInstance = null;
+                }
+                panZoomInstance = svgPanZoom(svgElement, {
                     zoomEnabled: true,
                     controlIconsEnabled: true,
                     fit: true,
@@ -1361,6 +1722,8 @@ export abstract class BaseFlowchartProvider {
             }
 
             window.addEventListener('load', () => {
+                // 告知扩展宿主：脚本已就绪，后续更新可以走消息通道
+                vscode.postMessage({ command: 'webviewReady', payload: {} });
                 setTimeout(() => {
                     const svgElement = document.querySelector('.mermaid svg');
                     if (svgElement) {
