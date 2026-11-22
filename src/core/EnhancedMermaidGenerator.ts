@@ -151,14 +151,17 @@ export class EnhancedMermaidGenerator {
       // 只有“标签就是源码原文”的语句节点才允许回写编辑
       const editable =
         node.location &&
+        !node.fold?.summary &&
         !EnhancedMermaidGenerator.NON_EDITABLE_TYPES.has(node.nodeType as NodeType) &&
         !EnhancedMermaidGenerator.isSyntheticLabel(node.label);
       const editAttrs = editable
         ? ` data-editable="1" data-start="${node.location!.start}" data-end="${node.location!.end}"`
         : "";
+      // 折叠信息只看 class（node-foldable / node-folded）：角标由 webview 画在形状左侧外面
+      const foldBadge = "";
       const codeBlock = isMergedBlock
         ? this.renderSegmentStack(segments)
-        : `<div class="code-label"${editAttrs} style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${this.escapeString(node.label)}</div>`;
+        : `<div class="code-label"${editAttrs} style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${foldBadge}${this.escapeString(node.label)}</div>`;
       const label = codeBlock;
 
       this.sb.append("    ");
@@ -239,8 +242,15 @@ export class EnhancedMermaidGenerator {
         this.sb.append(" ");
         this.sb.append(className);
         this.sb.appendLine("");
-      } else if (node.style) {
-        // Fallback for nodes with old-style inline styling
+      }
+      // 可折叠节点单独一条 class 语句（一行只能带一个类名）
+      if (node.fold) {
+        this.sb.append("    class ");
+        this.sb.append(node.id);
+        this.sb.append(node.fold.collapsed ? " node-folded" : " node-foldable");
+        this.sb.appendLine("");
+      }
+      if (!node.nodeType && node.style) {
         this.sb.append("    ");
         this.sb.append(node.id);
         this.sb.append(":::fallback_");

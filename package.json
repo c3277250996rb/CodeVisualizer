@@ -86,6 +86,16 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "codevisualizer.foldAllBranches",
+        "title": "CodeVisualizer: Fold All Branches",
+        "icon": "$(fold)"
+      },
+      {
+        "command": "codevisualizer.unfoldAllBranches",
+        "title": "CodeVisualizer: Unfold All Branches",
+        "icon": "$(unfold)"
+      },
+      {
         "command": "codevisualizer.exportFlowchart",
         "title": "CodeVisualizer: Export Flowchart",
         "icon": "$(export)"

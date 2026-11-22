@@ -49,6 +49,18 @@ export interface NodeSegment {
   code: string;
 }
 
+/** 折叠信息：挂在锚点（判断节点）与折叠后的摘要节点上。 */
+export interface FoldInfo {
+  /** 被折叠的语句节点个数。 */
+  count: number;
+  /** 当前是否为折叠状态。 */
+  collapsed: boolean;
+  /** 摘要节点指回它的锚点；锚点自己不带这个字段。 */
+  anchorId?: string;
+  /** 标记这是折叠后生成的摘要节点（不可行内编辑）。 */
+  summary?: boolean;
+}
+
 export interface FlowchartNode {
   id: string;
   label: string;
@@ -63,6 +75,9 @@ export interface FlowchartNode {
 
   /** 合并块内逐条语句的源码范围，用于每个小节单独点击跳转。 */
   segments?: NodeSegment[];
+
+  /** 折叠信息；有值才渲染折叠钮。 */
+  fold?: FoldInfo;
 }
 
 export interface FlowchartEdge {

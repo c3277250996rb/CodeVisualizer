@@ -861,6 +861,8 @@ export class CAstParser extends AbstractParser {
     let lastCaseExitPoints: { id: string; label?: string }[] = [
       { id: switchId },
     ];
+    // switch 自己的汇合出口：case 的 break 与末层 case 出口都汇到这里
+    const switchExitId = this.generateNodeId("switch_exit");
 
     for (const caseNode of cases) {
       const isDefault = caseNode.type === "default";
@@ -896,11 +898,12 @@ export class CAstParser extends AbstractParser {
         ];
 
         for (const stmt of caseBody) {
-          // Handle break statements specially in switch context
+          // Handle break statements specially in switch context：
+          // break 只跳出 switch，必须汇到 switch 自己的出口，不能直接跳到函数 End
           if (stmt.type === "break_statement") {
             const breakResult = this.processBreakStatement(stmt, {
-              breakTargetId: exitId,
-              continueTargetId: loopContext?.continueTargetId || exitId,
+              breakTargetId: switchExitId,
+              continueTargetId: loopContext?.continueTargetId || switchExitId,
             });
             nodes.push(...breakResult.nodes);
             edges.push(...breakResult.edges);
@@ -956,11 +959,31 @@ export class CAstParser extends AbstractParser {
     // Handle cases with no match
     allExitPoints.push(...lastCaseExitPoints);
 
+    // switch 自己的汇合出口：所有 case 出口（含 break）都汇到这里，再由调用方接下一句
+    nodes.push(
+      this.createSemanticNode(
+        switchExitId,
+        "end switch",
+        NodeType.MERGE,
+        switchNode
+      )
+    );
+    for (const exitPoint of allExitPoints) {
+      if (exitPoint.id === switchExitId) {
+        continue;
+      }
+      edges.push({
+        from: exitPoint.id,
+        to: switchExitId,
+        label: exitPoint.label,
+      });
+    }
+
     return this.createProcessResult(
       nodes,
       edges,
       switchId,
-      allExitPoints,
+      [{ id: switchExitId }],
       nodesConnectedToExit
     );
   }

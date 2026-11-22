@@ -37,6 +37,16 @@ export async function activate(context: vscode.ExtensionContext) {
     )
   );
 
+  // 折叠/展开所有可折叠分支：作用在当前真正挂着的 webview 上
+  const applyFoldToViews = async (collapsed: boolean): Promise<void> => {
+    const targets = [FlowchartPanelProvider.peekInstance(), sidebarProvider];
+    for (const target of targets) {
+      if (target?.hasWebview()) {
+        await target.setAllFolds(collapsed);
+      }
+    }
+  };
+
   // Register panel commands
   context.subscriptions.push(
     vscode.commands.registerCommand("codevisualizer.openFlowchartInPanel", async () => {
@@ -75,6 +85,28 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("codevisualizer.focusLoopNode", () => {
       FlowchartPanelProvider.getInstance(context.extensionUri).focusNodeKind("loop");
     }),
+
+    // 折叠/展开所有可折叠的 ?? 分支
+    vscode.commands.registerCommand("codevisualizer.foldAllBranches", async () => {
+      await applyFoldToViews(true);
+    }),
+    vscode.commands.registerCommand("codevisualizer.unfoldAllBranches", async () => {
+      await applyFoldToViews(false);
+    }),
+
+    // 仅测试环境注册：让 webview 模拟点击折叠角标，用来验证真实点击链路
+    ...(process.env.CODEVISUALIZER_CAPTURE_DIRECTORY
+      ? [
+          vscode.commands.registerCommand("codevisualizer.debugFoldClick", () => {
+            const targets = [FlowchartPanelProvider.peekInstance(), sidebarProvider];
+            for (const target of targets) {
+              if (target?.hasWebview()) {
+                target.simulateFoldClick();
+              }
+            }
+          }),
+        ]
+      : []),
 
     vscode.commands.registerCommand(
       "codevisualizer.openFlowchartInNewColumn",

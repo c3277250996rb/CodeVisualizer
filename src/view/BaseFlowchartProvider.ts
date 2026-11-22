@@ -12,6 +12,7 @@ import {
   DocumentSnapshot,
 } from "../core/document/DocumentModel";
 import { collectSymbols } from "../core/document/SymbolCatalog";
+import { applyFolds, planFoldRegions } from "../core/fold/CollapsePlanner";
 
 const MERMAID_VERSION = "11.8.0";
 const SVG_PAN_ZOOM_VERSION = "3.6.1";
@@ -88,6 +89,11 @@ export type RevealVariableMessage = {
   payload: { start: number; end: number };
 };
 
+export type ToggleFoldMessage = {
+  command: "toggleFold";
+  payload: { anchorId: string; collapsed?: boolean };
+};
+
 export type WebviewMessage =
   | HighlightCodeMessage
   | ExportMessage
@@ -102,7 +108,8 @@ export type WebviewMessage =
   | WebviewReadyMessage
   | RequestFunctionMessage
   | EditStatementMessage
-  | RevealVariableMessage;
+  | RevealVariableMessage
+  | ToggleFoldMessage;
 
 export interface FlowchartViewContext {
   isPanel: boolean;
@@ -144,6 +151,10 @@ export abstract class BaseFlowchartProvider {
   protected _lastDocumentUri?: string;
   /** 上次渲染的函数名，用于判断是否切换了函数（切函数要清画布并重置缩放）。 */
   protected _lastFunctionName?: string;
+  /** 默认折叠：这里只记用户显式展开过的判断；键为 "uri#函数名"。 */
+  protected _expandedAnchors = new Map<string, Set<string>>();
+  /** 折叠状态刚变过：即使光标还在同一函数里也要重新生成图。 */
+  private _foldsDirty = false;
   /** 交互期间跳过的刷新，交互结束后补做。 */
   protected _pendingUpdate: boolean = false;
   /** 页面未就绪时挂起的节点聚焦请求。 */
@@ -301,6 +312,13 @@ export abstract class BaseFlowchartProvider {
    */
   protected async handleWebviewMessage(message: WebviewMessage): Promise<void> {
     switch (message.command) {
+      case "toggleFold": {
+        await this.toggleFold(
+          message.payload.anchorId,
+          message.payload.collapsed
+        );
+        return;
+      }
       case "highlightCode": {
         const { start, end } = message.payload;
         const editor = vscode.window.activeTextEditor;
@@ -659,6 +677,104 @@ export abstract class BaseFlowchartProvider {
   }
 
   /**
+   * 折叠状态按 "uri#函数名" 存；切函数/切文件时自动失效。
+   */
+  private foldKey(): string | undefined {
+    const document = this._currentDocument;
+    if (!document) {
+      return undefined;
+    }
+    return `${document.uri.toString()}#${this._lastFunctionName ?? ""}`;
+  }
+
+  private expandedAnchorSet(create: boolean): Set<string> | undefined {
+    const key = this.foldKey();
+    if (!key) {
+      return undefined;
+    }
+    let set = this._expandedAnchors.get(key);
+    if (!set && create) {
+      set = new Set<string>();
+      this._expandedAnchors.set(key, set);
+    }
+    return set;
+  }
+
+  /** 默认折叠：除了用户显式展开的，其余可折叠区域全部收起。 */
+  private collapsedAnchorsFor(ir: FlowchartIR): Set<string> {
+    const expanded = this.expandedAnchorSet(false) ?? new Set<string>();
+    const collapsed = new Set<string>();
+    for (const region of planFoldRegions(ir)) {
+      if (!expanded.has(region.anchorId)) {
+        collapsed.add(region.anchorId);
+      }
+    }
+    return collapsed;
+  }
+
+  /** 当前文档对应的编辑器（面板抢焦点时 activeTextEditor 可能为空）。 */
+  private editorForCurrentDocument(): vscode.TextEditor | undefined {
+    const uri = this._currentDocument?.uri.toString();
+    if (!uri) {
+      return vscode.window.activeTextEditor;
+    }
+    return (
+      vscode.window.visibleTextEditors.find(
+        (candidate) => candidate.document.uri.toString() === uri
+      ) ?? vscode.window.activeTextEditor
+    );
+  }
+
+  /** 供命令使用：当前视图是否真的挂在 webview 上。 */
+  public hasWebview(): boolean {
+    return Boolean(this.getWebview());
+  }
+
+  /** 调试用：让 webview 模拟点击第一个折叠角标。 */
+  public simulateFoldClick(): void {
+    this.getWebview()?.postMessage({ command: "simulateFoldClick", payload: {} });
+  }
+
+  /** 折叠/展开单个判断的 ✔️ 分支。 */
+  public async toggleFold(anchorId: string, collapsed?: boolean): Promise<void> {
+    const expanded = this.expandedAnchorSet(true);
+    if (!expanded) {
+      return;
+    }
+    const nextCollapsed = collapsed ?? !expanded.has(anchorId);
+    if (nextCollapsed) {
+      expanded.delete(anchorId);
+    } else {
+      expanded.add(anchorId);
+    }
+    this._foldsDirty = true;
+    await this.updateView(this.editorForCurrentDocument());
+  }
+
+  /** 供命令使用：一次折叠/展开当前函数里所有可折叠分支。 */
+  public async setAllFolds(collapsed: boolean): Promise<void> {
+    if (!this.getWebview() || !this._currentDocument) {
+      return;
+    }
+    const expanded = this.expandedAnchorSet(true);
+    if (!expanded) {
+      return;
+    }
+    expanded.clear();
+    if (!collapsed) {
+      const snapshot = await this.getSnapshot(
+        this._currentDocument,
+        this._currentPosition ?? 0
+      );
+      for (const region of planFoldRegions(snapshot.ir)) {
+        expanded.add(region.anchorId);
+      }
+    }
+    this._foldsDirty = true;
+    await this.updateView(this.editorForCurrentDocument());
+  }
+
+  /**
    * 按当前主题生成 Mermaid 代码。
    */
   private generateMermaid(ir: FlowchartIR): string {
@@ -772,7 +888,8 @@ export abstract class BaseFlowchartProvider {
     }
 
     // Prevent updates when user is interacting with the webview
-    if (this._userInteracting) {
+    // （折叠是用户的显式操作，点角标时会带着手势状态，不能被这个门挡掉）
+    if (this._userInteracting && !this._foldsDirty) {
       this._pendingUpdate = true;
       return;
     }
@@ -807,7 +924,7 @@ export abstract class BaseFlowchartProvider {
     }
 
     // Check if we need to update - avoid unnecessary regeneration
-    const shouldUpdate = this._shouldUpdate(document, position);
+    const shouldUpdate = this._foldsDirty || this._shouldUpdate(document, position);
     if (!shouldUpdate) {
       // Just update highlighting if we're still in the same function
       if (
@@ -823,6 +940,7 @@ export abstract class BaseFlowchartProvider {
     }
 
     this._isUpdating = true;
+    this._foldsDirty = false;
     if (!this._htmlRendered) {
       this.setWebviewHtml(this.getLoadingHtml("Generating flowchart..."));
     }
@@ -830,7 +948,9 @@ export abstract class BaseFlowchartProvider {
     try {
       const snapshot = await this.getSnapshot(document, position);
 
-      this._locationMap = snapshot.ir.locationMap;
+      // 折叠：把已折叠的判断区域换成摘要节点，图源与位置映射都用折叠后的 IR
+      const foldedIr = applyFolds(snapshot.ir, this.collapsedAnchorsFor(snapshot.ir));
+      this._locationMap = foldedIr.locationMap;
       this._currentDocument = document;
       this._currentVersion = document.version;
       this._currentPosition = position;
@@ -844,7 +964,7 @@ export abstract class BaseFlowchartProvider {
         this._currentFunctionRange = undefined;
       }
 
-      const mermaidCode = this.generateMermaid(snapshot.ir);
+      const mermaidCode = this.generateMermaid(foldedIr);
       this._mermaidCodeOriginal = mermaidCode;
       this._mermaidCodeLLM = undefined;
 
@@ -856,6 +976,10 @@ export abstract class BaseFlowchartProvider {
       const structureChanged = this._lastStructureKey !== snapshot.structureKey;
       const documentChanged = this._lastDocumentUri !== document.uri.toString();
       const functionChanged = this._lastFunctionName !== snapshot.ir.functionName;
+      if (documentChanged || functionChanged) {
+        // 换文件/换函数：展开状态不跟过去，新函数回到默认折叠
+        this._expandedAnchors.clear();
+      }
       if (!this._htmlRendered || !this._webviewReady) {
         // 首次渲染（或 webview 重建）：整页加载一次
         this.setWebviewHtml(
@@ -1068,6 +1192,32 @@ export abstract class BaseFlowchartProvider {
             }
             .mermaid .code-cell:hover .code-cell-code {
               filter: drop-shadow(0 0 6px var(--hover-stroke));
+            }
+            /* 折叠钮：画在判断节点左侧外面的 2 倍大角标（由 decorateFoldBadges 生成） */
+            .mermaid .fold-badge {
+              cursor: pointer;
+            }
+            .mermaid .fold-badge circle {
+              fill: var(--vscode-editorWidget-background, #2d2d2d);
+              stroke: var(--vscode-descriptionForeground);
+              stroke-width: 1;
+            }
+            .mermaid .fold-badge text {
+              fill: var(--vscode-editor-foreground);
+              font-family: 'Segoe UI Symbol', sans-serif;
+              font-size: 18px;
+              font-weight: 700;
+              user-select: none;
+            }
+            .mermaid .fold-badge:hover circle {
+              stroke: var(--hover-stroke);
+              stroke-width: 2;
+            }
+            /* 折叠后的摘要节点用虚线框，表示里面还有东西 */
+            .mermaid .node-folded .label-container,
+            .mermaid .node-folded rect,
+            .mermaid .node-folded path {
+              stroke-dasharray: 5 4 !important;
             }
             /* 行内编辑：去掉行分隔线与底色，只留输入框自己的描边 */
             .mermaid .code-cell.is-editing {
@@ -1333,6 +1483,7 @@ export abstract class BaseFlowchartProvider {
                             const svgElement = document.querySelector('.mermaid svg');
                             if (svgElement) {
                                 setupInteractions(svgElement);
+                                decorateFoldBadgesWithRetry(svgElement);
                                 if (highlightedNodeId) {
                                     const hl = document.getElementById(highlightedNodeId);
                                     if (hl) {
@@ -1359,6 +1510,78 @@ export abstract class BaseFlowchartProvider {
                 run();
 
                 updateLlmToggle(opts.llmApplied);
+            }
+
+            // 可折叠角标：贴在节点形状左侧外面，尺寸约是行内符号的 2 倍，
+            // 追加在 SVG 内部，平移/缩放会跟着图一起动，也不会被标签框裁剪
+            function decorateFoldBadges(svgRoot) {
+                // mermaid 可能把自定义类挂在 g.node 或内层形状上，这里统一归到 g.node
+                const found = Array.from(
+                    svgRoot.querySelectorAll('.node-folded, .node-foldable')
+                );
+                const nodes = [];
+                found.forEach((element) => {
+                    const host = element.closest('g.node') || element;
+                    if (nodes.indexOf(host) < 0) {
+                        nodes.push(host);
+                    }
+                });
+                // 先量好尺寸再插角标，避免刚插入的元素影响后续节点的 bbox
+                const boxes = nodes.map((node) => {
+                    try {
+                        return node.getBBox();
+                    } catch (error) {
+                        return null;
+                    }
+                });
+                const NS = 'http://www.w3.org/2000/svg';
+                nodes.forEach((node, index) => {
+                    const box = boxes[index];
+                    if (!box || box.width === 0 || box.height === 0) {
+                        return;
+                    }
+                    const existing = node.querySelector('.fold-badge');
+                    if (existing) {
+                        existing.remove();
+                    }
+                    const collapsed = node.classList.contains('node-folded');
+                    const rawId = node.getAttribute('data-id') || node.id || '';
+                    // 注意：这段代码在 TS 模板字符串里，正则不能写 \\d（会被去掉反斜杠）
+                    const anchorId = String(rawId)
+                        .replace(/^flowchart-/, '')
+                        .replace(/-[0-9]+$/, '');
+                    const centerX = box.x - 24;
+                    const centerY = box.y + box.height / 2;
+                    const badge = document.createElementNS(NS, 'g');
+                    badge.setAttribute('class', 'fold-badge');
+                    badge.setAttribute('data-anchor', anchorId);
+                    badge.setAttribute('data-collapsed', collapsed ? '1' : '0');
+                    const circle = document.createElementNS(NS, 'circle');
+                    circle.setAttribute('cx', String(centerX));
+                    circle.setAttribute('cy', String(centerY));
+                    circle.setAttribute('r', '13');
+                    const text = document.createElementNS(NS, 'text');
+                    text.setAttribute('x', String(centerX));
+                    text.setAttribute('y', String(centerY + 6));
+                    text.setAttribute('text-anchor', 'middle');
+                    text.textContent = collapsed ? '▾' : '▸';
+                    badge.appendChild(circle);
+                    badge.appendChild(text);
+                    node.appendChild(badge);
+                });
+                return nodes.length;
+            }
+
+            // 大图渲染较慢：节点类名可能还没落到 DOM 上，短间隔重试几次
+            function decorateFoldBadgesWithRetry(svgRoot, attempts) {
+                const remaining = typeof attempts === 'number' ? attempts : 20;
+                const count = decorateFoldBadges(svgRoot);
+                if (count === 0 && remaining > 0) {
+                    setTimeout(
+                        () => decorateFoldBadgesWithRetry(svgRoot, remaining - 1),
+                        150
+                    );
+                }
             }
 
             // 面板/侧边栏宽度变化（拖动分隔条、放大视图）后必须重新适配，
@@ -1407,6 +1630,16 @@ export abstract class BaseFlowchartProvider {
                             focusNodeKindHandler(message.payload && message.payload.kind);
                         }
                         break;
+
+                    case 'simulateFoldClick': {
+                        const badges = document.querySelectorAll('.fold-badge');
+                        if (badges.length > 0) {
+                            badges[0].dispatchEvent(
+                                new MouseEvent('click', { bubbles: true, cancelable: true })
+                            );
+                        }
+                        break;
+                    }
 
                     case 'nodeZoomFontScale':
                         if (typeof message.payload.scale === 'number' && isFinite(message.payload.scale)) {
@@ -1666,6 +1899,27 @@ export abstract class BaseFlowchartProvider {
                       : row;
                     startCodeEdit(codeElement || row, start, end);
                   });
+
+                  // 折叠钮：单击折叠/展开该判断的 ✔️ 分支（捕获阶段先拦下，
+                  // 否则 mermaid 的 click 指令会把这次点击当成"跳到代码"）
+                  svgElement.addEventListener('click', (event) => {
+                    const target = event.target instanceof Element ? event.target : null;
+                    const toggle = target ? target.closest('.fold-badge, .fold-toggle') : null;
+                    if (!toggle) {
+                      return;
+                    }
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const anchorId = toggle.getAttribute('data-anchor');
+                    if (!anchorId) {
+                      return;
+                    }
+                    const currentlyCollapsed = toggle.getAttribute('data-collapsed') === '1';
+                    vscode.postMessage({
+                      command: 'toggleFold',
+                      payload: { anchorId, collapsed: !currentlyCollapsed },
+                    });
+                  }, true);
 
                   // 双击节点局部放大；双击空白处复位全图
                   svgElement.addEventListener('dblclick', (event) => {
@@ -2088,6 +2342,7 @@ export abstract class BaseFlowchartProvider {
                     const svgElement = document.querySelector('.mermaid svg');
                     if (svgElement) {
                         setupInteractions(svgElement);
+                        decorateFoldBadgesWithRetry(svgElement);
                     } else {
                         console.error('[CodeVisualizer] SVG element for flowchart not found after initial load!');
                     }

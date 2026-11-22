@@ -19,6 +19,11 @@ export class FlowchartPanelProvider extends BaseFlowchartProvider {
     return FlowchartPanelProvider._instance;
   }
 
+  /** 只看现有的单例，不创建（命令里用它判断面板是否真的打开着）。 */
+  public static peekInstance(): FlowchartPanelProvider | undefined {
+    return FlowchartPanelProvider._instance;
+  }
+
   public static reset(): void {
     if (FlowchartPanelProvider._instance) {
       FlowchartPanelProvider._instance.dispose();

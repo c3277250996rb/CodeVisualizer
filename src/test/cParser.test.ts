@@ -3,7 +3,10 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { EnhancedMermaidGenerator } from "../core/EnhancedMermaidGenerator";
 import { CAstParser } from "../core/language-services/c/CAstParser";
-import { NodeType } from "../ir/ir";
+import { applyFolds, planFoldRegions } from "../core/fold/CollapsePlanner";
+import { analyzeCode } from "../core/analyzer";
+import { initCLanguageService } from "../core/language-services/c";
+import { FlowchartIR, NodeType } from "../ir/ir";
 
 /** 轮询等待条件成立，替代固定 sleep，避免无意义等待 */
 async function waitFor<T>(probe: () => T | undefined, timeoutMs: number): Promise<T | undefined> {
@@ -34,6 +37,8 @@ suite("C flowchart parser", () => {
   const LOOPBODY_TEST = "LOOPBODY while 与 do-while 的循环体要逐条展开";
   const ESCAPE_TEST = "ESCAPE 代码里的 != 与反斜杠要原样显示";
   const OUTLINE_TEST = "OUTLINE 侧边栏只剩流程图视图";
+  const FOLD_TEST = "FOLD 判断的 then 分支可以折叠";
+  const ADCFUNCS_TEST = "ADCFUNCS my_adc.c 每个函数逐个校验";
 
   const ANY_TEST = (): boolean =>
     selected(PARSER_TEST) ||
@@ -43,7 +48,9 @@ suite("C flowchart parser", () => {
     selected(ELSE_TEST) ||
     selected(LOOPBODY_TEST) ||
     selected(ESCAPE_TEST) ||
-    selected(OUTLINE_TEST);
+    selected(OUTLINE_TEST) ||
+    selected(FOLD_TEST) ||
+    selected(ADCFUNCS_TEST);
 
   suiteSetup(async () => {
     if (!ANY_TEST()) {
@@ -780,6 +787,431 @@ suite("C flowchart parser", () => {
       await tryCommand("workbench.action.increaseViewSize");
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // 折叠：只折 ✔️（then）分支，默认全展开，点节点角标触发展开/折叠
+  if (selected(FOLD_TEST)) {
+    test(FOLD_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      const samplePath = path.join(__dirname, "../../test-files/fold_sample.c");
+      const sampleText = require("fs").readFileSync(samplePath, "utf8") as string;
+
+      // 1) L3：规划器只认 then 分支、且要求单出口
+      const ir = parser.generateFlowchart(sampleText, "fold_sample");
+      const regions = planFoldRegions(ir);
+      const anchor = ir.nodes.find(
+        (node) => node.nodeType === NodeType.DECISION && node.label.includes("value #62; 10")
+      ) ?? ir.nodes.find((node) => node.nodeType === NodeType.DECISION);
+      assert.ok(anchor, "样例里应有 if 判断节点");
+      const region = regions.find((item) => item.anchorId === anchor!.id);
+      assert.ok(region, "then 分支应被识别成可折叠区域");
+      assert.strictEqual(region!.statementCount, 3, "then 分支有 3 条语句");
+      assert.strictEqual(region!.exitTargets.length, 1, "区域必须只有一个出口");
+      const elseNode = ir.nodes.find((node) => node.label.includes("total = value;"));
+      assert.ok(elseNode, "样例里应有 else 的语句");
+      assert.ok(
+        !region!.memberIds.includes(elseNode!.id),
+        "else 分支不能被算进 then 区域"
+      );
+      // 由 else 分支进入合并点时，该区域必须被判定为不可折叠
+      const multiIr = parser.generateFlowchart(sampleText, "fold_multi_exit_sample");
+      const multiRegions = planFoldRegions(multiIr);
+      for (const multiRegion of multiRegions) {
+        assert.strictEqual(
+          multiRegion.exitTargets.length,
+          1,
+          "多出口区域不允许折叠"
+        );
+      }
+
+      // 2) L3：折叠后成员被摘要节点替代，边重新接到摘要节点
+      const collapsedIr = applyFolds(ir, new Set([anchor!.id]));
+      assert.strictEqual(
+        collapsedIr.nodes.length,
+        ir.nodes.length - region!.memberIds.length + 1,
+        "折叠后节点数应为 原节点 - 成员 + 1 个摘要"
+      );
+      for (const memberId of region!.memberIds) {
+        assert.ok(
+          !collapsedIr.nodes.some((node) => node.id === memberId),
+          `成员节点应被隐藏: ${memberId}`
+        );
+      }
+      const summary = collapsedIr.nodes.find(
+        (node) => node.fold?.summary === true
+      );
+      assert.ok(summary, "折叠后应有摘要节点");
+      assert.ok(
+        summary!.label.includes(`共 ${region!.statementCount} 步`),
+        `摘要应标明被折叠的语句数: ${summary!.label}`
+      );
+      const anchorAfter = collapsedIr.nodes.find((node) => node.id === anchor!.id);
+      assert.ok(anchorAfter?.fold, "锚点要带折叠信息");
+      assert.strictEqual(anchorAfter!.fold!.collapsed, true, "锚点应标记为已折叠");
+      assert.ok(
+        collapsedIr.edges.some(
+          (edge) => edge.from === anchor!.id && edge.to === summary!.id
+        ),
+        "锚点要连到摘要节点"
+      );
+      assert.ok(
+        collapsedIr.edges.some(
+          (edge) =>
+            edge.from === summary!.id && edge.to === region!.exitTargets[0]
+        ),
+        "摘要节点要接回区域出口"
+      );
+      assert.ok(
+        !collapsedIr.locationMap.some((entry) =>
+          region!.memberIds.includes(entry.nodeId)
+        ),
+        "隐藏节点不应再出现在 locationMap"
+      );
+
+      // 3) L2：图源里有折叠钮与折叠类名，且不再出现被隐藏的语句
+      const mermaid = new EnhancedMermaidGenerator().generate(collapsedIr);
+      assert.ok(mermaid.includes("node-folded"), "折叠后的节点要有 node-folded 类（webview 据此画角标）");
+      assert.ok(
+        !mermaid.includes("MyUart_WriteString"),
+        "被折叠的语句不应再出现在图源里"
+      );
+
+      // 3.1) 大函数 MyAdc_SendTelemetry：没有 if，只能折 for 循环体
+      const adcPath = path.join(__dirname, "../../test-files/my_adc.c");
+      const adcText = require("fs").readFileSync(adcPath, "utf8") as string;
+      const adcIr = parser.generateFlowchart(adcText, "MyAdc_SendTelemetry");
+
+      // switch 里的 break 必须汇到 switch 自己的出口，不能直接跳到函数 End
+      const breakNodes = adcIr.nodes.filter(
+        (node) => node.nodeType === NodeType.BREAK_CONTINUE
+      );
+      assert.ok(breakNodes.length >= 4, `switch 里应有 break 节点，实际 ${breakNodes.length}`);
+      for (const breakNode of breakNodes) {
+        const outEdge = adcIr.edges.find((edge) => edge.from === breakNode.id);
+        assert.ok(outEdge, `break 必须有出边: ${breakNode.id}`);
+        assert.notStrictEqual(
+          outEdge!.to,
+          adcIr.exitNodeId,
+          `switch 的 break 不能跳到函数 End: ${breakNode.id}`
+        );
+        assert.ok(
+          outEdge!.to.startsWith("switch_exit"),
+          `break 应汇到 switch 出口，实际 ${outEdge!.to}`
+        );
+      }
+      assert.ok(
+        adcIr.nodes.some((node) => node.id.startsWith("switch_exit")),
+        "switch 需要一个自己的汇合出口节点"
+      );
+
+      // for 循环体是唯一可折叠区域，且只能靠回边收尾（不能吞掉循环之后的语句）
+      const adcRegions = planFoldRegions(adcIr);
+      const forRegion = adcRegions.find((item) => item.anchorId.startsWith("for_cond"));
+      assert.ok(forRegion, "for 循环体应被识别成可折叠区域");
+      assert.ok(
+        forRegion!.statementCount >= 20,
+        `循环体语句数应该很可观，实际 ${forRegion!.statementCount}`
+      );
+      assert.deepStrictEqual(forRegion!.exitTargets, [], "循环体只应有回边，没有外部出口");
+      const tailStatement = adcIr.nodes.find((node) => node.label.includes("V#92;r#92;n"));
+      assert.ok(tailStatement, "函数末尾应有 V\\r\\n 的写串语句");
+      assert.ok(
+        !forRegion!.memberIds.includes(tailStatement!.id),
+        "折叠区域不能吞掉循环之后的语句"
+      );
+
+      const adcCollapsed = applyFolds(adcIr, new Set([forRegion!.anchorId]));
+      assert.ok(
+        adcCollapsed.nodes.length < adcIr.nodes.length,
+        "折叠后节点应减少"
+      );
+      const adcIds = new Set(adcCollapsed.nodes.map((node) => node.id));
+      assert.deepStrictEqual(
+        adcCollapsed.edges
+          .filter((edge) => !adcIds.has(edge.from) || !adcIds.has(edge.to))
+          .map((edge) => `${edge.from}->${edge.to}`),
+        [],
+        "折叠后不能出现悬空边"
+      );
+      assert.ok(
+        adcCollapsed.nodes.some((node) => node.id === adcIr.exitNodeId),
+        "折叠后仍要保留函数 End 节点"
+      );
+      const adcSummary = adcCollapsed.nodes.find((node) => node.fold?.summary === true);
+      assert.ok(adcSummary, "折叠后应有摘要节点");
+      assert.ok(
+        adcCollapsed.edges.some(
+          (edge) => edge.from === adcSummary!.id && edge.to === forRegion!.anchorId
+        ),
+        "摘要要保留回边到循环条件"
+      );
+      assert.ok(
+        adcCollapsed.edges.some(
+          (edge) =>
+            edge.from === forRegion!.anchorId &&
+            edge.to === adcSummary!.id &&
+            /^true$/i.test(edge.label || "")
+        ),
+        "循环条件的 True 分支要指向摘要节点"
+      );
+
+      // 4) L4：用大函数 MyAdc_SendTelemetry 实拍展开态 → 点击角标折叠 → 再点击展开
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(adcPath));
+      let editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const fnPosition = document.getText().indexOf("MyAdc_SendTelemetry");
+      assert.ok(fnPosition >= 0, "样例里应有 MyAdc_SendTelemetry");
+      const cursor = document.positionAt(fnPosition);
+      editor.selection = new vscode.Selection(cursor, cursor);
+
+      await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+      const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+      const tab = await waitFor(
+        () =>
+          vscode.window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .find(isFlowchartPanel),
+        10000
+      );
+      assert.ok(tab, "Flowchart webview panel should open");
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      editor.selection = new vscode.Selection(cursor, cursor);
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      await vscode.commands.executeCommand("codevisualizer.debugFoldClick");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await vscode.commands.executeCommand("codevisualizer.debugFoldClick");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      await vscode.window.tabGroups.close(tab);
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // my_adc.c 全量函数结构校验 + 逐个渲染实拍
+  if (selected(ADCFUNCS_TEST)) {
+    test(ADCFUNCS_TEST, async function () {
+      this.timeout(60000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      const adcPath = path.join(__dirname, "../../test-files/my_adc.c");
+      const adcText = require("fs").readFileSync(adcPath, "utf8") as string;
+      const functions = parser.listFunctions(adcText);
+      assert.ok(functions.length >= 6, `my_adc.c 应有至少 6 个函数，实际 ${functions.length}`);
+
+      // analyzeCode 走的是语言服务注册表，测试进程里要自己初始化一次
+      await initCLanguageService(path.join(__dirname, "../../dist/tree-sitter-c.wasm"));
+
+      // 1) L3：逐函数结构 + 折叠不变量
+      const reachableFrom = (startId: string, edges: { from: string; to: string }[]): Set<string> => {
+        const out = new Map<string, string[]>();
+        for (const edge of edges) {
+          const list = out.get(edge.from);
+          if (list) {
+            list.push(edge.to);
+          } else {
+            out.set(edge.from, [edge.to]);
+          }
+        }
+        const seen = new Set<string>();
+        const stack = [startId];
+        while (stack.length > 0) {
+          const id = stack.pop() as string;
+          if (seen.has(id)) {
+            continue;
+          }
+          seen.add(id);
+          for (const next of out.get(id) ?? []) {
+            stack.push(next);
+          }
+        }
+        return seen;
+      };
+
+      // 单个函数的结构 + 折叠不变量；raw 与 merged 两套 IR 共用
+      const checkIr = (label: string, ir: FlowchartIR): void => {
+        const ids = new Set(ir.nodes.map((node) => node.id));
+        assert.ok(ir.nodes.length >= 2, `${label} 至少要有 Start/End`);
+        assert.ok(
+          ir.nodes.some((node) => node.id === ir.entryNodeId && node.label === "Start"),
+          `${label} 缺少 Start 节点`
+        );
+        assert.ok(
+          ir.nodes.some((node) => node.id === ir.exitNodeId && node.label === "End"),
+          `${label} 缺少 End 节点`
+        );
+        assert.deepStrictEqual(
+          ir.edges
+            .filter((edge) => !ids.has(edge.from) || !ids.has(edge.to))
+            .map((edge) => `${edge.from}->${edge.to}`),
+          [],
+          `${label} 存在悬空边`
+        );
+        assert.deepStrictEqual(
+          ir.nodes
+            .filter((node) => /^\s*\{/.test(node.label) || /^\s*else\b/i.test(node.label))
+            .map((node) => node.label),
+          [],
+          `${label} 存在整块花括号 / else 语句节点`
+        );
+        for (const breakNode of ir.nodes.filter(
+          (node) => node.nodeType === NodeType.BREAK_CONTINUE
+        )) {
+          const outEdge = ir.edges.find((edge) => edge.from === breakNode.id);
+          assert.ok(outEdge, `${label} 的 ${breakNode.id} 没有出边`);
+          assert.notStrictEqual(
+            outEdge!.to,
+            ir.exitNodeId,
+            `${label} 的 ${breakNode.id} 不能直连 End`
+          );
+        }
+
+        const regions = planFoldRegions(ir);
+        for (const region of regions) {
+          const falseEdge = ir.edges.find(
+            (edge) => edge.from === region.anchorId && /^false$/i.test(edge.label || "")
+          );
+          const falseReach = falseEdge
+            ? reachableFrom(falseEdge.to, ir.edges)
+            : new Set<string>();
+          for (const target of region.exitTargets) {
+            assert.ok(
+              falseReach.has(target),
+              `${label}: 区域 ${region.anchorId} 的出口 ${target} 不在 false 分支可达集合里`
+            );
+          }
+          assert.ok(
+            !region.memberIds.includes(ir.entryNodeId!) &&
+              !region.memberIds.includes(ir.exitNodeId!),
+            `${label}: 区域 ${region.anchorId} 不能包含 Start/End`
+          );
+        }
+        const collapsed = applyFolds(ir, new Set(regions.map((region) => region.anchorId)));
+        const collapsedIds = new Set(collapsed.nodes.map((node) => node.id));
+        assert.deepStrictEqual(
+          collapsed.edges
+            .filter((edge) => !collapsedIds.has(edge.from) || !collapsedIds.has(edge.to))
+            .map((edge) => `${edge.from}->${edge.to}`),
+          [],
+          `${label}: 折叠后出现悬空边`
+        );
+        assert.ok(
+          collapsed.nodes.some((node) => node.id === ir.entryNodeId),
+          `${label}: 折叠后丢了 Start`
+        );
+        assert.ok(
+          collapsed.nodes.some((node) => node.id === ir.exitNodeId),
+          `${label}: 折叠后丢了 End`
+        );
+        for (const summary of collapsed.nodes.filter((node) => node.fold?.summary === true)) {
+          assert.ok(
+            collapsed.edges.some((edge) => edge.from === summary.id),
+            `${label}: 摘要节点 ${summary.id} 没有出边`
+          );
+          assert.ok(
+            collapsed.edges.some((edge) => edge.to === summary.id),
+            `${label}: 摘要节点 ${summary.id} 没有入边`
+          );
+        }
+      };
+
+      for (const name of functions) {
+        checkIr(name, parser.generateFlowchart(adcText, name));
+        // UI 实际用的是 analyzeCode 合并后的 IR，两套都要过同一套不变量
+        const offset = adcText.indexOf(name);
+        const merged = await analyzeCode(adcText, "c", name, Math.max(offset, 0));
+        checkIr(`${name}(merged)`, merged);
+      }
+
+      // 2) L4：逐个函数渲染实拍（切函数会重置缩放，每张都是整图）
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(adcPath));
+      let editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const firstOffset = document.getText().indexOf(functions[0]);
+      const firstPosition = document.positionAt(Math.max(firstOffset, 0));
+      editor.selection = new vscode.Selection(firstPosition, firstPosition);
+
+      await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+      const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+      const tab = await waitFor(
+        () =>
+          vscode.window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .find(isFlowchartPanel),
+        10000
+      );
+      assert.ok(tab, "Flowchart webview panel should open");
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      // 图窄了节点文字读不出来：先关掉侧边栏，再把面板列拉宽
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      for (const name of functions) {
+        const offset = document.getText().indexOf(name);
+        const position = document.positionAt(Math.max(offset, 0));
+        editor.selection = new vscode.Selection(position, position);
+        // 每个函数停留 1.2s，让 100ms 实拍拍到它的整图
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+
+      await vscode.window.tabGroups.close(tab);
       await tryCommand("workbench.action.toggleFullScreen");
     });
   }
