@@ -208,6 +208,9 @@ suite("C flowchart parser", () => {
       editor.selection = new vscode.Selection(firstPosition, firstPosition);
 
       await tryCommand("codevisualizer.flowchartView.focus");
+      // 侧边栏太窄时 GLOBALS/LOCALS 会被切断，实拍读不出来：先把视图拉宽再拍
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
       const secondFunction = document.getText().indexOf("MyAdc_StartConversion");

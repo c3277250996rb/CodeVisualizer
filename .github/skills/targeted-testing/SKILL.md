@@ -39,14 +39,33 @@ argument-hint: '说明本次改了什么，我会据此写针对性断言并定�
      ```
      不能因为“侧边栏要关”就把被测视图一起关掉，那等于拍了个空窗口。
    - 用例结束时把全屏恢复回去（`toggleFullScreen` 再调一次），不要给用户留一个卡在半屏/全屏的窗口。
-4. **定向执行，只删“与本次改动无关的业务步骤”**
+4. **画面看不清 = 证据不合格：先拓宽面板/标签页、再放大内容，然后重新拍**
+   - 判定标准：帧里的**标签页标题、GLOBALS/LOCALS 列表项、节点文字**必须能直接读出来。看不清就是没拍到，不能说“裁剪放大一下也能看”。
+   - 禁止用裁剪 + 放大糊图来交差：裁剪只能用来临时确认，不能替代“把画面弄大再拍一次”。
+   - 三类对象的放大手段：
+     - **侧边栏视图**（`codevisualizer.flowchartView`）：先聚焦再变宽，必要时多调几次
+       ```ts
+       await tryCommand("codevisualizer.flowchartView.focus");
+       await tryCommand("workbench.action.increaseViewSize");
+       await tryCommand("workbench.action.increaseViewSize");
+       ```
+     - **编辑器区 webview 面板**：直接用项目命令铺满活动列（它会顺带关掉侧边栏视图，避免两份画面）
+       ```ts
+       await tryCommand("codevisualizer.maximizeFlowchartPanel");
+       ```
+     - **图内内容**（节点/循环）：用缩放命令把目标放到足够大，例如
+       ```ts
+       await tryCommand("codevisualizer.focusLoopNode");
+       ```
+   - 放完大之后必须**重新跑一次用例**（新的 `SCREEN_CAPTURE_DIRECTORY`），用新帧下结论；`setTimeout` 停留时间要够（≥1000ms）让 100ms 实拍捕捉到放大后的画面。
+5. **定向执行，只删“与本次改动无关的业务步骤”**
    - 一律用 `.\test.ps1 -Only <关键字>` 只跑本次相关的用例，不要默认全量。
    - 可以删：上一轮遗留的样例文件、无关断言、无意义的 `setTimeout`、与本次无关的鼠标模拟、旧的命令调用。
    - **不能删**：100ms 实拍录屏、以及上一条的“全屏 + 关闭侧边栏/底部面板/辅助栏”。这些不是“无关步骤”，而是采集证据的前提。
    - 用例里不允许出现“固定 sleep 等结果”，只用轮询等待（`waitFor`）或事件。
-5. **不复用旧证据**
+6. **不复用旧证据**
    - 每次以本次日志/本次截图目录为准，不用 `%TEMP%` 里上一轮的目录、不引用旧的 `Project.build_log.htm` 式残留。
-6. **时间预算**
+7. **时间预算**
    - `-SkipBuild` 单次 ≤ 10s，含构建 ≤ 20s；超了必须解释原因并优化掉（常见元凶：错误的选择器导致 10s 轮询到超时）。
 
 ## 断言层次（越靠下越好）
@@ -73,8 +92,8 @@ argument-hint: '说明本次改了什么，我会据此写针对性断言并定�
    ```
    注意：**绝不能**先 `compile` 再 `-SkipBuild` 而漏掉 `compile-tests`，否则 `out/test` 被删，0 个用例也返回退出码 0。
 6. **核对输出**：`1 passing`、`TEST_EXIT_CODE=0`、`SCREEN_CAPTURE_FRAME_COUNT>0`、平均间隔 ≈100ms。
-7. **看帧**：打开本次 `SCREEN_CAPTURE_DIRECTORY` 里放大后的某一帧，确认画面 = 本次改动后的真实效果；如果看不到，调整聚焦目标/停留时间，而不是放宽断言。
-8. **报告**：改动点 / 新增断言 / 执行的用例 / 帧数与目录 / 一帧的结论。证据不全就别说“测试通过”。帧里必须看得到**流程图面板本身**（全屏 + 关面板生效），而不是别的窗口。
+7. **看帧**：打开本次 `SCREEN_CAPTURE_DIRECTORY` 里放大后的某一帧，确认画面 = 本次改动后的真实效果；如果看不清（文字/标签/列表读不出来），按第 4 条去**拓宽面板或放大内容**后重跑，而不是放宽断言、也不是裁剪糊图。
+8. **报告**：改动点 / 新增断言 / 执行的用例 / 帧数与目录 / 一帧的结论。证据不全就别说“测试通过”。帧里必须看得到**流程图面板本身**（全屏 + 关面板生效），而不是别的窗口；看不清楚的部分要说明已经怎么放大重拍过。
 
 ## 本项目速查
 
@@ -85,6 +104,7 @@ argument-hint: '说明本次改了什么，我会据此写针对性断言并定�
 | 测试配置 | `.vscode-test.mjs`（`files: 'out/test/**/*.test.js'`） |
 | 录屏脚本 | `capture-screen.ps1`（100ms/帧 + `frames.csv`，`-ActivateWindowTitle` 保持窗口在前） |
 | 常用命令 | `codevisualizer.openFlowchartToSide`、`codevisualizer.focusLoopNode` |
+| 看不清时怎么放大（必做） | 侧边栏：`codevisualizer.flowchartView.focus` + `workbench.action.increaseViewSize`（可多次）；编辑器面板：`codevisualizer.maximizeFlowchartPanel`；图内：`codevisualizer.focusLoopNode` |
 | 交互约定 | 双击节点=局部放大；右键代码行=行内编辑；右键空白=复位；右键不可编辑节点=无操作 |
 | 测试窗口可视环境（**不可删**） | `toggleFullScreen` + `closeSidebar` + `closePanel` + `closeAuxiliaryBar`，结束时再 `toggleFullScreen` 恢复 |
 | 样例 | `test-files/my_adc.c`（`MyAdc_SendTelemetry`，含 for/do-while/while/switch） |
@@ -105,6 +125,7 @@ if (selected(MY_TEST)) {
     // 1) 只做与本次改动相关的准备
     // 2) L2/L3 断言：解析结果或图源内容
     // 3) 需要看画面时：打开面板 → focusLoopNode → 停留 1s 让实拍拍到
+    //    面板/侧边栏太窄看不清就先放大画面：maximizeFlowchartPanel 或 flowchartView.focus + increaseViewSize
     // 4) 结束时恢复全屏
   });
 }
@@ -120,4 +141,5 @@ if (selected(MY_TEST)) {
 - 用例还在跑上一轮的样例文件，和这次改动完全无关。
 - 固定 `sleep 5000` 等渲染，既慢又不稳。
 - 把“全屏 + 关闭侧边栏/底部面板/辅助栏”当成无关步骤删掉 → 实拍帧里全是别的窗口和侧边栏，等于没拍。
+- 帧里字太小、标签页糊成一团，却用裁剪放大去“凑证据” → 必须拓宽面板/最大化面板/放大内容后重拍。
 - 为了“快”把实拍关掉——这是明令禁止的。
