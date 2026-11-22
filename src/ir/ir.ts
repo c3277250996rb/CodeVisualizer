@@ -84,5 +84,7 @@ export interface FlowchartIR {
   exitNodeId?: string;
   locationMap: LocationMapEntry[];
   functionRange?: { start: number; end: number };
+  /** 本次分析的函数名（固定或跟随光标选中的那个），用于变量面板取局部变量。 */
+  functionName?: string;
   title?: string;
 }

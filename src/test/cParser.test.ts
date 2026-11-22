@@ -28,16 +28,17 @@ suite("C flowchart parser", () => {
     ONLY.length === 0 || title.toLowerCase().includes(ONLY);
   const PARSER_TEST = "generates a flowchart for the commented C sample";
   const SMOKE_TEST = "opens MyAdc_SendTelemetry and zooms into the loop";
+  const VARS_TEST = "VARS 变量面板跟随函数与文件刷新";
 
   suiteSetup(async () => {
-    if (!selected(PARSER_TEST) && !selected(SMOKE_TEST)) {
+    if (!selected(PARSER_TEST) && !selected(SMOKE_TEST) && !selected(VARS_TEST)) {
       return;
     }
     const wasmPath = path.join(__dirname, "../../dist/tree-sitter-c.wasm");
     parser = await CAstParser.create(wasmPath);
   });
 
-  if (!selected(PARSER_TEST) && !selected(SMOKE_TEST)) {
+  if (!selected(PARSER_TEST) && !selected(SMOKE_TEST) && !selected(VARS_TEST)) {
     test("filter matched no tests", () => {
       assert.fail(`CODEVISUALIZER_TEST_ONLY="${ONLY}" 没有匹配的用例`);
     });
@@ -145,5 +146,88 @@ suite("C flowchart parser", () => {
     await vscode.window.tabGroups.close(tab);
     await tryCommand("workbench.action.toggleFullScreen");
   });
+  }
+
+  // 变量面板：切函数、切文件后 Locals/Globals 必须换成对应的数据
+  if (selected(VARS_TEST)) {
+    test(VARS_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉侧边栏/底部面板/辅助栏，实拍才看得清
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      const adcPath = path.join(__dirname, "../../test-files/my_adc.c");
+      const adcText = require("fs").readFileSync(adcPath, "utf8") as string;
+
+      // 1) L3 断言：IR 必须带上实际分析的函数名，Locals 才是这个函数的
+      const flowA = parser.generateFlowchart(adcText, "MyAdc_SendTelemetry");
+      assert.strictEqual(flowA.functionName, "MyAdc_SendTelemetry", "IR 要记录分析的函数名");
+      const varsA = parser.collectVariables(adcText, flowA.functionName);
+      const namesA = varsA.locals.map((item) => item.name);
+      assert.ok(namesA.includes("vref_centivolts"), `Locals 应包含 SendTelemetry 的局部变量: ${namesA}`);
+      assert.ok(namesA.includes("values"), `Locals 应包含 values: ${namesA}`);
+
+      // 2) L3 断言：换函数后 Locals 必须变
+      const varsB = parser.collectVariables(adcText, "MyAdc_StartConversion");
+      const namesB = varsB.locals.map((item) => item.name);
+      assert.ok(namesB.includes("now_ticks"), `StartConversion 的 Locals 应有 now_ticks: ${namesB}`);
+      assert.ok(!namesB.includes("vref_centivolts"), `切函数后不应该是上一个函数的变量: ${namesB}`);
+      assert.notDeepStrictEqual(namesB, namesA, "两个函数的 Locals 不应该相同");
+
+      // 3) L3 断言：换文件后 Globals 必须变
+      const motorPath = path.join(__dirname, "../../test-files/my_motor.c");
+      const motorText = require("fs").readFileSync(motorPath, "utf8") as string;
+      const motorVars = parser.collectVariables(motorText, "MyMotor_Init");
+      const adcGlobals = varsA.globals.map((item) => item.name);
+      const motorGlobals = motorVars.globals.map((item) => item.name);
+      assert.ok(motorGlobals.length > 0, "my_motor.c 应该有全局变量");
+      assert.notDeepStrictEqual(motorGlobals, adcGlobals, "切文件后 Globals 不应该还是上一个文件的");
+
+      // 4) 视觉证据：GLOBALS/LOCALS 卡片长在侧边栏视图里（面板只画图），
+      //    所以这一步是"关无关 panel + 打开被测视图"，每个状态停留 1s 让 100ms 实拍拍到切换过程
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(adcPath));
+      const editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const firstFunction = document.getText().indexOf("MyAdc_SendTelemetry");
+      const firstPosition = document.positionAt(firstFunction);
+      editor.selection = new vscode.Selection(firstPosition, firstPosition);
+
+      await tryCommand("codevisualizer.flowchartView.focus");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      const secondFunction = document.getText().indexOf("MyAdc_StartConversion");
+      assert.ok(secondFunction > firstFunction, "样例里应能找到第二个函数");
+      const secondPosition = document.positionAt(secondFunction);
+      editor.selection = new vscode.Selection(secondPosition, secondPosition);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // 换文件：Globals 必须换成 my_motor.c 的
+      const motorDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(motorPath));
+      const motorEditor = await vscode.window.showTextDocument(motorDocument, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const motorFunction = motorDocument.getText().indexOf("MyMotor_Init");
+      const motorPosition = motorDocument.positionAt(motorFunction);
+      motorEditor.selection = new vscode.Selection(motorPosition, motorPosition);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
   }
 });

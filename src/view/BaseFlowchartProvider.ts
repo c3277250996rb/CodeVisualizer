@@ -636,7 +636,12 @@ export abstract class BaseFlowchartProvider {
       functionName: this._pinnedFunction,
       ir,
       metrics: MetricsAnalyzer.analyze(ir, document.getText()),
-      symbols: collectSymbols(document.getText(), document.languageId, this._pinnedFunction),
+      // 用本次实际分析的函数名取局部变量；固定模式下回退到固定函数
+      symbols: collectSymbols(
+        document.getText(),
+        document.languageId,
+        ir.functionName ?? this._pinnedFunction
+      ),
       structureKey: buildStructureKey(ir),
     };
     this._documentModel.store(snapshot);
@@ -1548,13 +1553,18 @@ export abstract class BaseFlowchartProvider {
                     requestAnimationFrame(centerStep);
                   }
 
-                  // 右键单击代码行进入编辑；右键空白处复位全图
+                  // 右键单击代码行进入编辑；只有在空白处右键才复位全图，
+                  // 不可编辑的节点（Start/End/break/case 等）右键什么都不做
                   svgElement.addEventListener('contextmenu', (event) => {
                     event.preventDefault();
-                    const row = event.target instanceof Element
-                      ? event.target.closest('.code-cell[data-editable="1"], .code-label[data-editable="1"]')
+                    const target = event.target instanceof Element ? event.target : null;
+                    const row = target
+                      ? target.closest('.code-cell[data-editable="1"], .code-label[data-editable="1"]')
                       : null;
                     if (!row) {
+                      if (target && target.closest('.node')) {
+                        return;
+                      }
                       notifyInteractionStart();
                       panZoomInstance.fit();
                       panZoomInstance.center();

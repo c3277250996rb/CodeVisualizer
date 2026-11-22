@@ -221,6 +221,8 @@ export class CAstParser extends AbstractParser {
     const funcNameStr = this.escapeString(
       this.extractFunctionName(declarator) || "[anonymous]"
     );
+    // 未转义的函数名，供变量面板定位局部变量
+    const rawFunctionName = this.extractFunctionName(declarator) || "[anonymous]";
     const title = `Flowchart for function: ${funcNameStr}`;
 
     if (!bodyToProcess) {
@@ -276,6 +278,7 @@ export class CAstParser extends AbstractParser {
       edges: validEdges,
       locationMap: this.locationMap,
       functionRange: { start: targetNode.startIndex, end: targetNode.endIndex },
+      functionName: rawFunctionName,
       title,
       entryNodeId: entryId,
       exitNodeId: exitId,
