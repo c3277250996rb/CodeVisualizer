@@ -39,6 +39,8 @@ suite("C flowchart parser", () => {
   const OUTLINE_TEST = "OUTLINE 侧边栏只剩流程图视图";
   const FOLD_TEST = "FOLD 判断的 then 分支可以折叠";
   const ADCFUNCS_TEST = "ADCFUNCS my_adc.c 每个函数逐个校验";
+  const GLOW_TEST = "GLOW 光标与点击驱动节点光晕";
+  const FOLDDEFAULT_TEST = "FOLDDEFAULT 顶部复选框切换默认展开与折叠";
 
   const ANY_TEST = (): boolean =>
     selected(PARSER_TEST) ||
@@ -50,7 +52,9 @@ suite("C flowchart parser", () => {
     selected(ESCAPE_TEST) ||
     selected(OUTLINE_TEST) ||
     selected(FOLD_TEST) ||
-    selected(ADCFUNCS_TEST);
+    selected(ADCFUNCS_TEST) ||
+    selected(GLOW_TEST) ||
+    selected(FOLDDEFAULT_TEST);
 
   suiteSetup(async () => {
     if (!ANY_TEST()) {
@@ -1018,6 +1022,141 @@ suite("C flowchart parser", () => {
     });
   }
 
+  // 顶部复选框：决定分支默认展开还是默认折叠
+  if (selected(FOLDDEFAULT_TEST)) {
+    test(FOLDDEFAULT_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      // 1) L3：配置项在 package.json 里声明，默认折叠（false）
+      const manifest = require("../../package.json");
+      const property =
+        manifest.contributes.configuration.properties["codevisualizer.defaultExpandBranches"];
+      assert.ok(property, "package.json 要声明 codevisualizer.defaultExpandBranches");
+      assert.strictEqual(property.type, "boolean", "配置项应为 boolean");
+      assert.strictEqual(property.default, false, "默认应为折叠（false）");
+
+      const config = vscode.workspace.getConfiguration("codevisualizer");
+      const original = config.get<boolean>("defaultExpandBranches", false);
+      const setDefault = async (expanded: boolean): Promise<void> => {
+        await config.update(
+          "defaultExpandBranches",
+          expanded,
+          vscode.ConfigurationTarget.Global
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      };
+
+      try {
+        // 2) L1：打开样例函数，先按默认（折叠）实拍
+        const samplePath = path.join(__dirname, "../../test-files/fold_sample.c");
+        const document = await vscode.workspace.openTextDocument(
+          vscode.Uri.file(samplePath)
+        );
+        let editor = await vscode.window.showTextDocument(document, {
+          viewColumn: vscode.ViewColumn.One,
+          preview: false,
+        });
+        const ifPosition = document.getText().indexOf("if (value > 10)");
+        assert.ok(ifPosition >= 0, "样例里应有 if (value > 10)");
+        const cursor = document.positionAt(ifPosition);
+        editor.selection = new vscode.Selection(cursor, cursor);
+
+        await setDefault(false);
+        await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+        const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+          candidate.input instanceof vscode.TabInputWebview &&
+          candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+        const tab = await waitFor(
+          () =>
+            vscode.window.tabGroups.all
+              .flatMap((group) => group.tabs)
+              .find(isFlowchartPanel),
+          10000
+        );
+        assert.ok(tab, "Flowchart webview panel should open");
+
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        editor = await vscode.window.showTextDocument(document, {
+          viewColumn: vscode.ViewColumn.One,
+          preview: false,
+        });
+        editor.selection = new vscode.Selection(cursor, cursor);
+        await tryCommand("workbench.action.increaseViewSize");
+        await tryCommand("workbench.action.increaseViewSize");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // 3) L3：折叠态图源里应出现摘要节点
+        const parserLocal = await CAstParser.create(
+          path.join(__dirname, "../../dist/tree-sitter-c.wasm")
+        );
+        const sampleText = document.getText();
+        const ir = parserLocal.generateFlowchart(sampleText, "fold_sample");
+        const regions = planFoldRegions(ir);
+        assert.ok(regions.length > 0, "样例里应有可折叠区域");
+        const collapsedIr = applyFolds(
+          ir,
+          new Set(regions.map((region) => region.anchorId))
+        );
+        assert.ok(
+          collapsedIr.nodes.some((node) => node.fold?.summary === true),
+          "折叠态应生成摘要节点"
+        );
+        assert.ok(
+          applyFolds(ir, new Set()).nodes.length === ir.nodes.length,
+          "展开态不应隐藏任何节点"
+        );
+
+        // 4) L1：点击顶部复选框 → 默认展开 → 图重画成展开态
+        await vscode.commands.executeCommand("codevisualizer.debugFoldDefaultClick");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        assert.strictEqual(
+          vscode.workspace
+            .getConfiguration("codevisualizer")
+            .get<boolean>("defaultExpandBranches", false),
+          true,
+          "点一次复选框后配置应切到默认展开"
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        // 5) L1：再点一次复选框 → 回到默认折叠
+        await vscode.commands.executeCommand("codevisualizer.debugFoldDefaultClick");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        assert.strictEqual(
+          vscode.workspace
+            .getConfiguration("codevisualizer")
+            .get<boolean>("defaultExpandBranches", false),
+          false,
+          "再点一次复选框应回到默认折叠"
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        await vscode.window.tabGroups.close(tab);
+      } finally {
+        await config.update(
+          "defaultExpandBranches",
+          original,
+          vscode.ConfigurationTarget.Global
+        );
+        await tryCommand("workbench.action.toggleFullScreen");
+      }
+    });
+  }
+
   // my_adc.c 全量函数结构校验 + 逐个渲染实拍
   if (selected(ADCFUNCS_TEST)) {
     test(ADCFUNCS_TEST, async function () {
@@ -1210,6 +1349,110 @@ suite("C flowchart parser", () => {
         // 每个函数停留 1.2s，让 100ms 实拍拍到它的整图
         await new Promise((resolve) => setTimeout(resolve, 1200));
       }
+
+      await vscode.window.tabGroups.close(tab);
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // 光晕：光标所在节点要亮，点击节点后一直亮，点空白才恢复成光标节点
+  if (selected(GLOW_TEST)) {
+    test(GLOW_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      // 1) L3：光标位置必须能映射到一个节点（这个节点就是该亮光晕的那个）
+      const samplePath = path.join(__dirname, "../../test-files/escape_sample.c");
+      const sampleText = require("fs").readFileSync(samplePath, "utf8") as string;
+      const ir = parser.generateFlowchart(sampleText, "escape_sample");
+      const cursorOffset = sampleText.indexOf("MyUart_WriteString");
+      assert.ok(cursorOffset > 0, "样例里应有写串语句");
+      const cursorEntry = ir.locationMap.find(
+        (entry) => cursorOffset >= entry.start && cursorOffset <= entry.end
+      );
+      assert.ok(cursorEntry, "光标位置应命中一个节点的源码区间");
+      const conditionEntry = ir.locationMap.find(
+        (entry) => {
+          const text = ir.nodes.find((node) => node.id === entry.nodeId)?.label ?? "";
+          return text.includes("value != 0");
+        }
+      );
+      assert.ok(conditionEntry, "判断条件应有自己的区间");
+      assert.notStrictEqual(
+        cursorEntry!.nodeId,
+        conditionEntry!.nodeId,
+        "光标语句与判断条件必须是不同节点（便于验证光晕切换）"
+      );
+
+      // 2) L4：光标在写串语句上 → 该节点光晕；点另一个节点 → 光晕跟过去并保持；
+      //    点空白 → 取消锁定
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(samplePath));
+      let editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const cursorPosition = document.positionAt(cursorOffset);
+      editor.selection = new vscode.Selection(cursorPosition, cursorPosition);
+
+      await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+      const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+      const tab = await waitFor(
+        () =>
+          vscode.window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .find(isFlowchartPanel),
+        10000
+      );
+      assert.ok(tab, "Flowchart webview panel should open");
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      editor.selection = new vscode.Selection(cursorPosition, cursorPosition);
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      // 点击另一个节点 → 光晕锁定在它上面
+      await vscode.commands.executeCommand("codevisualizer.debugGlowClick");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // 点空白 → 取消锁定，光晕回到光标节点
+      await vscode.commands.executeCommand("codevisualizer.debugGlowBlank");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // 光标切到另一个节点 → 光晕必须跟着换到那个节点
+      const conditionOffset = sampleText.indexOf("if (value != 0)");
+      assert.ok(conditionOffset > 0, "样例里应有 if 条件");
+      const conditionPosition = document.positionAt(conditionOffset);
+      editor.selection = new vscode.Selection(conditionPosition, conditionPosition);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      const returnOffset = sampleText.indexOf("return value");
+      assert.ok(returnOffset > 0, "样例里应有 return 语句");
+      const returnPosition = document.positionAt(returnOffset);
+      editor.selection = new vscode.Selection(returnPosition, returnPosition);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
 
       await vscode.window.tabGroups.close(tab);
       await tryCommand("workbench.action.toggleFullScreen");

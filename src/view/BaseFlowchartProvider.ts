@@ -94,6 +94,11 @@ export type ToggleFoldMessage = {
   payload: { anchorId: string; collapsed?: boolean };
 };
 
+export type SetFoldDefaultMessage = {
+  command: "setFoldDefault";
+  payload: { expanded: boolean };
+};
+
 export type WebviewMessage =
   | HighlightCodeMessage
   | ExportMessage
@@ -109,7 +114,8 @@ export type WebviewMessage =
   | RequestFunctionMessage
   | EditStatementMessage
   | RevealVariableMessage
-  | ToggleFoldMessage;
+  | ToggleFoldMessage
+  | SetFoldDefaultMessage;
 
 export interface FlowchartViewContext {
   isPanel: boolean;
@@ -151,8 +157,13 @@ export abstract class BaseFlowchartProvider {
   protected _lastDocumentUri?: string;
   /** 上次渲染的函数名，用于判断是否切换了函数（切函数要清画布并重置缩放）。 */
   protected _lastFunctionName?: string;
+  /** 当前图里的 Start / End 节点 id，用于从位置映射里排除这两个边界节点。 */
+  private _entryNodeId?: string;
+  private _exitNodeId?: string;
   /** 默认折叠：这里只记用户显式展开过的判断；键为 "uri#函数名"。 */
   protected _expandedAnchors = new Map<string, Set<string>>();
+  /** 用户显式折叠过的判断（默认展开时用来反向覆盖）。 */
+  protected _collapsedAnchors = new Map<string, Set<string>>();
   /** 折叠状态刚变过：即使光标还在同一函数里也要重新生成图。 */
   private _foldsDirty = false;
   /** 交互期间跳过的刷新，交互结束后补做。 */
@@ -170,6 +181,13 @@ export abstract class BaseFlowchartProvider {
         if (e.affectsConfiguration("codevisualizer.theme")) {
           // Refresh the current view when theme changes
           this.updateView(vscode.window.activeTextEditor);
+          return;
+        }
+        if (e.affectsConfiguration("codevisualizer.defaultExpandBranches")) {
+          // 默认展开/折叠变了：清掉逐个切换的覆盖，按新默认重画
+          this.resetFoldOverrides();
+          this._foldsDirty = true;
+          void this.updateView(this.editorForCurrentDocument());
           return;
         }
         if (e.affectsConfiguration("codevisualizer.nodeZoomFontScale")) {
@@ -264,10 +282,7 @@ export abstract class BaseFlowchartProvider {
           this._currentFunctionRange.contains(selection)
         ) {
           const offset = event.textEditor.document.offsetAt(selection.active);
-          const entry = this._locationMap.find(
-            (e) => offset >= e.start && offset <= e.end
-          );
-          this.highlightNode(entry ? entry.nodeId : null);
+          this.highlightNode(this.nodeIdAtOffset(offset));
         } else {
           // If the cursor moves out of the function, regenerate the flowchart
           await this.updateView(event.textEditor);
@@ -317,6 +332,10 @@ export abstract class BaseFlowchartProvider {
           message.payload.anchorId,
           message.payload.collapsed
         );
+        return;
+      }
+      case "setFoldDefault": {
+        await this.setDefaultExpandBranches(message.payload.expanded);
         return;
       }
       case "highlightCode": {
@@ -688,24 +707,49 @@ export abstract class BaseFlowchartProvider {
   }
 
   private expandedAnchorSet(create: boolean): Set<string> | undefined {
+    return this.anchorOverrideSet(this._expandedAnchors, create);
+  }
+
+  private collapsedAnchorSet(create: boolean): Set<string> | undefined {
+    return this.anchorOverrideSet(this._collapsedAnchors, create);
+  }
+
+  private anchorOverrideSet(
+    store: Map<string, Set<string>>,
+    create: boolean
+  ): Set<string> | undefined {
     const key = this.foldKey();
     if (!key) {
       return undefined;
     }
-    let set = this._expandedAnchors.get(key);
+    let set = store.get(key);
     if (!set && create) {
       set = new Set<string>();
-      this._expandedAnchors.set(key, set);
+      store.set(key, set);
     }
     return set;
   }
 
-  /** 默认折叠：除了用户显式展开的，其余可折叠区域全部收起。 */
+  /** 顶部复选框：true = 分支默认展开，false = 默认折叠。 */
+  private defaultExpandBranches(): boolean {
+    return vscode.workspace
+      .getConfiguration("codevisualizer")
+      .get<boolean>("defaultExpandBranches", false);
+  }
+
+  /**
+   * 按“默认展开/折叠 + 用户逐个切换的覆盖”算出要折叠的锚点集合。
+   */
   private collapsedAnchorsFor(ir: FlowchartIR): Set<string> {
-    const expanded = this.expandedAnchorSet(false) ?? new Set<string>();
+    const defaultExpanded = this.defaultExpandBranches();
+    const explicitExpanded = this.expandedAnchorSet(false) ?? new Set<string>();
+    const explicitCollapsed = this.collapsedAnchorSet(false) ?? new Set<string>();
     const collapsed = new Set<string>();
     for (const region of planFoldRegions(ir)) {
-      if (!expanded.has(region.anchorId)) {
+      const shouldCollapse = defaultExpanded
+        ? explicitCollapsed.has(region.anchorId)
+        : !explicitExpanded.has(region.anchorId);
+      if (shouldCollapse) {
         collapsed.add(region.anchorId);
       }
     }
@@ -735,16 +779,34 @@ export abstract class BaseFlowchartProvider {
     this.getWebview()?.postMessage({ command: "simulateFoldClick", payload: {} });
   }
 
+  /** 调试用：模拟点击一个节点（或空白）来验证光晕锁定/解锁。 */
+  public simulateGlowClick(kind: "node" | "blank"): void {
+    this.getWebview()?.postMessage({ command: "simulateGlowClick", payload: { kind } });
+  }
+
+  /** 调试用：模拟点击顶部“默认展开”复选框，验证真实点击链路。 */
+  public simulateFoldDefaultClick(): void {
+    this.getWebview()?.postMessage({ command: "simulateFoldDefaultClick", payload: {} });
+  }
+
   /** 折叠/展开单个判断的 ✔️ 分支。 */
   public async toggleFold(anchorId: string, collapsed?: boolean): Promise<void> {
     const expanded = this.expandedAnchorSet(true);
-    if (!expanded) {
+    const explicitCollapsed = this.collapsedAnchorSet(true);
+    if (!expanded || !explicitCollapsed) {
       return;
     }
-    const nextCollapsed = collapsed ?? !expanded.has(anchorId);
+    const currentlyCollapsed = expanded.has(anchorId)
+      ? false
+      : this.defaultExpandBranches()
+        ? explicitCollapsed.has(anchorId)
+        : !expanded.has(anchorId);
+    const nextCollapsed = collapsed ?? !currentlyCollapsed;
     if (nextCollapsed) {
       expanded.delete(anchorId);
+      explicitCollapsed.add(anchorId);
     } else {
+      explicitCollapsed.delete(anchorId);
       expanded.add(anchorId);
     }
     this._foldsDirty = true;
@@ -757,21 +819,100 @@ export abstract class BaseFlowchartProvider {
       return;
     }
     const expanded = this.expandedAnchorSet(true);
-    if (!expanded) {
+    const explicitCollapsed = this.collapsedAnchorSet(true);
+    if (!expanded || !explicitCollapsed) {
       return;
     }
     expanded.clear();
-    if (!collapsed) {
-      const snapshot = await this.getSnapshot(
-        this._currentDocument,
-        this._currentPosition ?? 0
-      );
-      for (const region of planFoldRegions(snapshot.ir)) {
+    explicitCollapsed.clear();
+    const snapshot = await this.getSnapshot(
+      this._currentDocument,
+      this._currentPosition ?? 0
+    );
+    for (const region of planFoldRegions(snapshot.ir)) {
+      if (collapsed) {
+        explicitCollapsed.add(region.anchorId);
+      } else {
         expanded.add(region.anchorId);
       }
     }
     this._foldsDirty = true;
     await this.updateView(this.editorForCurrentDocument());
+  }
+
+  /** 顶部复选框：切换默认展开/折叠并立即重绘。 */
+  public async setDefaultExpandBranches(expanded: boolean): Promise<void> {
+    await vscode.workspace
+      .getConfiguration("codevisualizer")
+      .update("defaultExpandBranches", expanded, vscode.ConfigurationTarget.Global);
+    this.resetFoldOverrides();
+    this._foldsDirty = true;
+    await this.updateView(this.editorForCurrentDocument());
+  }
+
+  private resetFoldOverrides(): void {
+    this._expandedAnchors.clear();
+    this._collapsedAnchors.clear();
+  }
+
+  /**
+   * 光标位置 → 节点：在覆盖该偏移的所有区间里取最窄的那个，
+   * 否则 if/switch 条件会被外面那一大块合并语句抢走。
+   */
+  private nodeIdAtOffset(offset: number): string | null {
+    let best: LocationMapEntry | undefined;
+    let bestWidth = Number.POSITIVE_INFINITY;
+    for (const entry of this._locationMap) {
+      if (offset < entry.start || offset > entry.end) {
+        continue;
+      }
+      const width = entry.end - entry.start;
+      if (width < bestWidth) {
+        best = entry;
+        bestWidth = width;
+      }
+    }
+    if (!best) {
+      return null;
+    }
+    // Start/End 的区间盖住整个函数，光标落在 if 关键字这类空隙时会被它抢到；
+    // 这时退化成“后面第一个真实节点”
+    if (best.nodeId === this._entryNodeId || best.nodeId === this._exitNodeId) {
+      const next = this._locationMap
+        .filter(
+          (entry) =>
+            entry.start >= offset &&
+            entry.nodeId !== this._entryNodeId &&
+            entry.nodeId !== this._exitNodeId
+        )
+        .sort((left, right) => left.start - right.start)[0];
+      if (next) {
+        return next.nodeId;
+      }
+    }
+    return best.nodeId;
+  }
+
+  /**
+   * 位置映射补全：解析器给出的 locationMap 可能缺少条件节点，
+   * 这里把每个带 location 的节点都补上，光标才能落到节点上。
+   */
+  private buildLocationMap(ir: FlowchartIR): LocationMapEntry[] {
+    const map = ir.locationMap.slice();
+    for (const node of ir.nodes) {
+      if (!node.location) {
+        continue;
+      }
+      if (map.some((entry) => entry.nodeId === node.id)) {
+        continue;
+      }
+      map.push({
+        start: node.location.start,
+        end: node.location.end,
+        nodeId: node.id,
+      });
+    }
+    return map;
   }
 
   /**
@@ -931,10 +1072,7 @@ export abstract class BaseFlowchartProvider {
         this._currentFunctionRange &&
         this._currentFunctionRange.contains(editor.selection.active)
       ) {
-        const entry = this._locationMap.find(
-          (e) => position >= e.start && position <= e.end
-        );
-        this.highlightNode(entry ? entry.nodeId : null);
+        this.highlightNode(this.nodeIdAtOffset(position));
       }
       return;
     }
@@ -950,7 +1088,9 @@ export abstract class BaseFlowchartProvider {
 
       // 折叠：把已折叠的判断区域换成摘要节点，图源与位置映射都用折叠后的 IR
       const foldedIr = applyFolds(snapshot.ir, this.collapsedAnchorsFor(snapshot.ir));
-      this._locationMap = foldedIr.locationMap;
+      this._locationMap = this.buildLocationMap(foldedIr);
+      this._entryNodeId = foldedIr.entryNodeId;
+      this._exitNodeId = foldedIr.exitNodeId;
       this._currentDocument = document;
       this._currentVersion = document.version;
       this._currentPosition = position;
@@ -977,8 +1117,8 @@ export abstract class BaseFlowchartProvider {
       const documentChanged = this._lastDocumentUri !== document.uri.toString();
       const functionChanged = this._lastFunctionName !== snapshot.ir.functionName;
       if (documentChanged || functionChanged) {
-        // 换文件/换函数：展开状态不跟过去，新函数回到默认折叠
-        this._expandedAnchors.clear();
+        // 换文件/换函数：逐个切换的状态不跟过去，新函数按默认值重新算
+        this.resetFoldOverrides();
       }
       if (!this._htmlRendered || !this._webviewReady) {
         // 首次渲染（或 webview 重建）：整页加载一次
@@ -1006,6 +1146,11 @@ export abstract class BaseFlowchartProvider {
         });
         webview.postMessage({ command: "llmAvailability", payload: availability });
       }
+      // 顶栏“默认展开”复选框始终与配置保持一致
+      webview.postMessage({
+        command: "foldDefaultState",
+        payload: { expanded: this.defaultExpandBranches() },
+      });
       webview.postMessage({
         command: "applySymbols",
         payload: {
@@ -1024,10 +1169,7 @@ export abstract class BaseFlowchartProvider {
 
       // After updating the view, immediately highlight the node for the current cursor
       const offset = editor.document.offsetAt(editor.selection.active);
-      const entry = this._locationMap.find(
-        (e) => offset >= e.start && offset <= e.end
-      );
-      this.highlightNode(entry ? entry.nodeId : null);
+      this.highlightNode(this.nodeIdAtOffset(offset));
 
     } catch (error) {
       console.error("Flowchart generation failed:", error);
@@ -1264,45 +1406,45 @@ export abstract class BaseFlowchartProvider {
 
 
             
-            /* Hovered node, child, or edge */
-            .mermaid svg .node.hover-highlight > *,
-            .mermaid svg .node.child-highlight > * {
+            /* 点击/光标驱动的光晕：不再由悬停触发 */
+            .mermaid svg .node.glow > *,
+            .mermaid svg .node.glow-child > * {
                 fill: var(--hover-fill) !important;
                 stroke: var(--hover-stroke) !important;
                 stroke-width: var(--hover-stroke-width) !important;
                 filter: drop-shadow(0 0 8px var(--hover-stroke));
             }
 
-            /* 合并块：外框保留背景光晕（A），文字层不加光晕，文字光晕只给悬停行（C） */
-            .mermaid svg .node.hover-highlight:has(.code-stack) > g.label,
-            .mermaid svg .node.child-highlight:has(.code-stack) > g.label {
+            /* 合并块：外框保留光晕，文字层不加光晕 */
+            .mermaid svg .node.glow:has(.code-stack) > g.label,
+            .mermaid svg .node.glow-child:has(.code-stack) > g.label {
                 filter: none !important;
             }
             
             /* Enhanced edge highlighting that works with different Mermaid edge structures */
-            .mermaid g[class*="edge"].hover-highlight > *,
-            .mermaid g[id^="L_"].hover-highlight > *,
-            .mermaid path[class*="edge"].hover-highlight,
-            .mermaid g.hover-highlight > path,
-            .mermaid g.edgePath.hover-highlight > path.path {
+            .mermaid g[class*="edge"].glow > *,
+            .mermaid g[id^="L_"].glow > *,
+            .mermaid path[class*="edge"].glow,
+            .mermaid g.glow > path,
+            .mermaid g.edgePath.glow > path.path {
                 stroke: var(--hover-edge-color) !important;
                 stroke-width: var(--hover-edge-width) !important;
                 filter: drop-shadow(0 0 2px var(--hover-edge-color));
             }
 
             /* Arrow markers for highlighted edges */
-            .mermaid g[class*="edge"].hover-highlight polygon,
-            .mermaid g[id^="L_"].hover-highlight polygon,
-            .mermaid g.hover-highlight polygon,
-            .mermaid g.edgePath.hover-highlight polygon {
+            .mermaid g[class*="edge"].glow polygon,
+            .mermaid g[id^="L_"].glow polygon,
+            .mermaid g.glow polygon,
+            .mermaid g.edgePath.glow polygon {
                 fill: var(--hover-edge-color) !important;
                 stroke: var(--hover-edge-color) !important;
             }
 
             /* Edge labels */
-            .mermaid g[class*="edge"].hover-highlight text,
-            .mermaid g[id^="L_"].hover-highlight text,
-            .mermaid g.hover-highlight text {
+            .mermaid g[class*="edge"].glow text,
+            .mermaid g[id^="L_"].glow text,
+            .mermaid g.glow text {
                 fill: var(--hover-edge-color) !important;
                 font-weight: bold !important;
             }
@@ -1336,6 +1478,9 @@ export abstract class BaseFlowchartProvider {
             }
 
             let highlightedNodeId = null;
+            // 由 setupInteractions 赋值的两个回调：重绘后重建光晕、光标驱动光晕
+            let glowRefresh = null;
+            let setCursorGlow = null;
             // 重渲染后复用的 pan/zoom 实例
             let panZoomInstance = null;
             // 由面板命令触发的节点聚焦处理（setupInteractions 里赋值）
@@ -1490,6 +1635,12 @@ export abstract class BaseFlowchartProvider {
                                         hl.classList.add('highlighted');
                                     }
                                 }
+                                if (typeof glowRefresh === 'function') {
+                                    glowRefresh();
+                                }
+                                if (typeof setCursorGlow === 'function') {
+                                    setCursorGlow(highlightedNodeId);
+                                }
                                 if (state) {
                                     restoreViewState(state);
                                 } else {
@@ -1611,19 +1762,15 @@ export abstract class BaseFlowchartProvider {
             window.addEventListener('message', event => {
                 const message = event.data;
                 switch (message.command) {
-                    case 'highlightNode':
-                        if (highlightedNodeId) {
-                            const oldElem = document.getElementById(highlightedNodeId);
-                            if (oldElem) oldElem.classList.remove('highlighted');
-                        }
-
+                    case 'highlightNode': {
                         const newId = message.payload.nodeId;
-                        if (newId) {
-                            const newElem = document.getElementById(newId);
-                            if (newElem) newElem.classList.add('highlighted');
-                        }
                         highlightedNodeId = newId;
+                        // 光标在哪个节点上，就点亮哪个节点的光晕
+                        if (typeof setCursorGlow === 'function') {
+                            setCursorGlow(newId);
+                        }
                         break;
+                    }
 
                     case 'focusNodeKind':
                         if (typeof focusNodeKindHandler === 'function') {
@@ -1641,11 +1788,52 @@ export abstract class BaseFlowchartProvider {
                         break;
                     }
 
+                    case 'simulateGlowClick': {
+                        const svgRoot = document.querySelector('.mermaid svg');
+                        if (!svgRoot) {
+                            break;
+                        }
+                        const kind = message.payload && message.payload.kind;
+                        if (kind === 'blank') {
+                            svgRoot.dispatchEvent(
+                                new MouseEvent('click', { bubbles: true, cancelable: true })
+                            );
+                            break;
+                        }
+                        const nodeElement = Array.from(svgRoot.querySelectorAll('g.node')).find(
+                            (node) => !node.classList.contains('glow')
+                        );
+                        if (nodeElement) {
+                            const shape = nodeElement.querySelector('rect, polygon, path') || nodeElement;
+                            shape.dispatchEvent(
+                                new MouseEvent('click', { bubbles: true, cancelable: true })
+                            );
+                        }
+                        break;
+                    }
+
                     case 'nodeZoomFontScale':
                         if (typeof message.payload.scale === 'number' && isFinite(message.payload.scale)) {
                             nodeZoomFontScale = Math.max(0.8, Math.min(0.8, message.payload.scale));
                         }
                         break;
+
+                    case 'foldDefaultState': {
+                        const box = document.getElementById('fold-default-checkbox');
+                        if (box instanceof HTMLInputElement) {
+                            box.checked = message.payload.expanded === true;
+                        }
+                        break;
+                    }
+
+                    case 'simulateFoldDefaultClick': {
+                        const box = document.getElementById('fold-default-checkbox');
+                        if (box instanceof HTMLInputElement) {
+                            box.checked = !box.checked;
+                            box.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                        break;
+                    }
 
                     case 'applyGraph':
                     case 'applyMermaid': {
@@ -2089,33 +2277,93 @@ export abstract class BaseFlowchartProvider {
                 // Parse edge metadata once
                 const edgeMetadata = parseEdgeMetadata();
 
+                // 光晕：click 锁定一个节点直到点空白；光标也会驱动一个节点
+                const glowState = {
+                    cursorNodeId: null,
+                    pinnedNodeId: null,
+                };
+
+                function findNodeElement(nodeId) {
+                    if (!nodeId) {
+                        return null;
+                    }
+                    // 一律查当前页面上的 SVG：重绘后旧引用会失效，光晕就永远清不掉了
+                    const root = document.querySelector('.mermaid svg');
+                    if (!root) {
+                        return null;
+                    }
+                    return (
+                        document.getElementById(nodeId) ||
+                        root.querySelector('[data-id="' + nodeId + '"]') ||
+                        root.querySelector('.node[id^="flowchart-' + nodeId + '-"]') ||
+                        root.querySelector('#flowchart-' + nodeId + '-0')
+                    );
+                }
+
+                function clearGlowClasses() {
+                    document
+                        .querySelectorAll('.mermaid .glow, .mermaid .glow-child')
+                        .forEach((element) => {
+                            element.classList.remove('glow', 'glow-child');
+                        });
+                }
+
+                // 把光晕打到一个节点上，同时点亮它的出边与直接后继
+                function paintGlow(targetNode) {
+                    if (!targetNode) {
+                        return;
+                    }
+                    targetNode.classList.add('glow');
+                    const fullNodeId = targetNode.id;
+                    if (!fullNodeId) {
+                        return;
+                    }
+                    const baseId = extractBaseId(fullNodeId);
+                    findOutgoingEdges(fullNodeId, edgeMetadata).forEach((edge) => {
+                        edge.classList.add('glow');
+                    });
+                    findConnectedNodes(baseId, edgeMetadata).forEach((connectedNode) => {
+                        connectedNode.classList.add('glow-child');
+                    });
+                }
+
+                // 点击锁定的优先，没有锁定时用光标所在节点
+                function refreshGlow() {
+                    clearGlowClasses();
+                    const activeId = glowState.pinnedNodeId || glowState.cursorNodeId;
+                    paintGlow(findNodeElement(activeId));
+                }
+
+                glowRefresh = refreshGlow;
+                setCursorGlow = (nodeId) => {
+                    glowState.cursorNodeId = nodeId || null;
+                    refreshGlow();
+                };
+
+                // 点击节点 → 持续光晕；点击空白 → 取消锁定（回到光标节点）
+                svgElement.addEventListener('click', (event) => {
+                    const target = event.target instanceof Element ? event.target : null;
+                    if (!target) {
+                        return;
+                    }
+                    if (target.closest('.fold-badge')) {
+                        return;
+                    }
+                    const nodeElement = target.closest('g.node');
+                    if (!nodeElement) {
+                        glowState.pinnedNodeId = null;
+                        refreshGlow();
+                        return;
+                    }
+                    glowState.pinnedNodeId = nodeElement.id || null;
+                    refreshGlow();
+                });
+
                 const allNodes = svgElement.querySelectorAll('.node');
                 allNodes.forEach((node) => {
                     const fullNodeId = node.id;
                     if (!fullNodeId) return;
-
-                    node.addEventListener('mouseenter', (event) => {
-                        event.stopPropagation();
-                        node.classList.add('hover-highlight');
-
-                        const baseId = extractBaseId(fullNodeId);
-                        
-                        const outgoingEdges = findOutgoingEdges(fullNodeId, edgeMetadata);
-                        outgoingEdges.forEach(edge => {
-                            edge.classList.add('hover-highlight');
-                        });
-
-                        const connectedNodes = findConnectedNodes(baseId, edgeMetadata);
-                        connectedNodes.forEach(connectedNode => {
-                            connectedNode.classList.add('child-highlight');
-                        });
-                    });
-
-                    node.addEventListener('mouseleave', () => {
-                        document.querySelectorAll('.hover-highlight, .child-highlight').forEach(el => {
-                            el.classList.remove('hover-highlight', 'child-highlight');
-                        });
-                    });
+                    // 悬停不再触发光晕：点一下才亮，点空白才灭
                 });
 
                 // 合并块内的每个小节单独可点，点击定位到该语句本身
@@ -2343,6 +2591,9 @@ export abstract class BaseFlowchartProvider {
                     if (svgElement) {
                         setupInteractions(svgElement);
                         decorateFoldBadgesWithRetry(svgElement);
+                        if (typeof setCursorGlow === 'function') {
+                            setCursorGlow(highlightedNodeId);
+                        }
                     } else {
                         console.error('[CodeVisualizer] SVG element for flowchart not found after initial load!');
                     }
@@ -2369,6 +2620,17 @@ export abstract class BaseFlowchartProvider {
             }
 
             function setupButtonHandlers() {
+                // 顶部复选框：勾选 = 分支默认展开，取消 = 默认折叠
+                const foldDefaultCheckbox = document.getElementById('fold-default-checkbox');
+                if (foldDefaultCheckbox && !foldDefaultCheckbox.dataset.bound) {
+                    foldDefaultCheckbox.dataset.bound = '1';
+                    foldDefaultCheckbox.addEventListener('change', () => {
+                        vscode.postMessage({
+                            command: 'setFoldDefault',
+                            payload: { expanded: foldDefaultCheckbox.checked },
+                        });
+                    });
+                }
                 const copyBtn = document.getElementById('copy-mermaid');
                 if (copyBtn) {
                     copyBtn.addEventListener('click', () => {
@@ -2715,7 +2977,29 @@ export abstract class BaseFlowchartProvider {
             position: fixed;
             top: 10px;
             left: 10px;
-          z-index: 1002;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            z-index: 1002;
+        }
+
+        /* 默认展开/折叠复选框（常驻顶部） */
+        #fold-default-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: var(--vscode-editorWidget-background, rgba(0, 0, 0, 0.35));
+            color: var(--vscode-editor-foreground);
+            font-size: 11px;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        #fold-default-toggle input {
+            margin: 0;
+            cursor: pointer;
         }
 
         /* Metrics panel */
@@ -2813,7 +3097,15 @@ export abstract class BaseFlowchartProvider {
   }
 
   private getHtmlForControls(context: any, codeMetrics?: CodeMetrics): string {
+    // 默认展开/折叠开关（勾选 = 默认展开），常驻顶部
+    const defaultExpanded = vscode.workspace
+      .getConfiguration("codevisualizer")
+      .get<boolean>("defaultExpandBranches", false);
     const toolbarToggleButton = `
+        <label id="fold-default-toggle" title="勾选：分支默认展开；取消：分支默认折叠">
+            <input type="checkbox" id="fold-default-checkbox"${defaultExpanded ? " checked" : ""} />
+            默认展开
+        </label>
         <button id="toolbar-toggle" title="Show toolbar" aria-label="Show toolbar">☰</button>
     `;
 

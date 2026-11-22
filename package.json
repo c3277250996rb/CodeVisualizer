@@ -94,8 +94,7 @@
         "command": "codevisualizer.unfoldAllBranches",
         "title": "CodeVisualizer: Unfold All Branches",
         "icon": "$(unfold)"
-      },
-      {
+      },      {
         "command": "codevisualizer.exportFlowchart",
         "title": "CodeVisualizer: Export Flowchart",
         "icon": "$(export)"
@@ -265,6 +264,11 @@
           "minimum": 0.8,
           "maximum": 0.8,
           "description": "Maximum zoom when right-clicking a node, expressed as a multiple of the code font size inside that node. 1 keeps the font at its original size, 2 renders it twice as large."
+        },
+        "codevisualizer.defaultExpandBranches": {
+          "type": "boolean",
+          "default": false,
+          "description": "When checked, branches are expanded by default. When unchecked (default), branches start collapsed and each one can be toggled by clicking the chevron badge on the left of the decision node."
         },
         "codevisualizer.llm.enabled": {
           "type": "boolean",

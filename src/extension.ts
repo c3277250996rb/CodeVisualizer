@@ -105,6 +105,30 @@ export async function activate(context: vscode.ExtensionContext) {
               }
             }
           }),
+          vscode.commands.registerCommand("codevisualizer.debugGlowClick", () => {
+            const targets = [FlowchartPanelProvider.peekInstance(), sidebarProvider];
+            for (const target of targets) {
+              if (target?.hasWebview()) {
+                target.simulateGlowClick("node");
+              }
+            }
+          }),
+          vscode.commands.registerCommand("codevisualizer.debugGlowBlank", () => {
+            const targets = [FlowchartPanelProvider.peekInstance(), sidebarProvider];
+            for (const target of targets) {
+              if (target?.hasWebview()) {
+                target.simulateGlowClick("blank");
+              }
+            }
+          }),
+          vscode.commands.registerCommand("codevisualizer.debugFoldDefaultClick", () => {
+            const targets = [FlowchartPanelProvider.peekInstance(), sidebarProvider];
+            for (const target of targets) {
+              if (target?.hasWebview()) {
+                target.simulateFoldDefaultClick();
+              }
+            }
+          }),
         ]
       : []),
 
