@@ -154,7 +154,7 @@ void MyMotor_Init(void) {
 	PWMPINV &= (unsigned char)~MY_MOTOR_PWM_CHANNELS;
 	EPWM_EnableOutput(MY_MOTOR_PWM_CHANNELS);
 	EPWM_Start(MY_MOTOR_PWM_CHANNELS);
-	/* FR 候选值直接取当前电平（引脚为高则候选 1，否则候选 0），但标记为尚未稳定，首轮需重新去抖。 */
+	/* 直接取当前电平（引脚为高则候选 1，否则候选 0），但标记为尚未稳定，首轮需重新去抖。 */
 	fr_candidate_level = (P23 == 0U) ? 0U : 1U;
 	fr_stable_level = fr_candidate_level;
 	fr_stable_valid = 0U;

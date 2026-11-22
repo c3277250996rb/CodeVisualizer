@@ -51,6 +51,11 @@
           "name": "Flowchart",
           "type": "webview",
           "icon": "media/icon.svg"
+        },
+        {
+          "id": "codevisualizer.outline",
+          "name": "Outline",
+          "icon": "media/icon.svg"
         }
       ]
     },

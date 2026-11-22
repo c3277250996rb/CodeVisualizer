@@ -24,6 +24,47 @@ class StringBuilder {
 }
 
 export class EnhancedMermaidGenerator {
+  /**
+   * 合成节点：标签不是源码里的语句（Start / End / Loop End / break / continue），
+   * 它们的 location 指向整段函数、循环头或语句本身，不能作为编辑目标，否则一次提交会把代码改坏。
+   */
+  private static readonly NON_EDITABLE_TYPES = new Set<NodeType>([
+    NodeType.ENTRY,
+    NodeType.EXIT,
+    NodeType.LOOP_END,
+    NodeType.BREAK_CONTINUE,
+  ]);
+
+  /** 边的布尔/分支标签：统一渲染成勾和叉 */
+  private static readonly EDGE_LABEL_GLYPHS: Record<string, string> = {
+    true: "✔️",
+    false: "✖",
+    match: "✔️",
+    "no match": "✖",
+  };
+
+  /**
+   * 标签本身是合成文字（不是源码原文）的节点也不能编辑，
+   * 例如 case 1: 覆盖整个 case 体、switch (x) 只包含条件、Python 的 match 只包含 subject。
+   */
+  private static isSyntheticLabel(label: string): boolean {
+    const text = label.trim().toLowerCase();
+    if (text === "default" || text === "break" || text === "continue") {
+      return true;
+    }
+    if (text.startsWith("case ")) {
+      return true;
+    }
+    if (text.startsWith("switch (") || text.startsWith("switch(")) {
+      return true;
+    }
+    // match 后面没有 = 才是分支头，避免误伤名为 match 的赋值语句
+    if (text.startsWith("match ") && text.indexOf("=") < 0) {
+      return true;
+    }
+    return false;
+  }
+
   private sb = new StringBuilder();
   private themeStyles: ThemeStyles;
 
@@ -106,11 +147,19 @@ export class EnhancedMermaidGenerator {
       const shape = this.getShape(node);
       const segments = node.segments ?? [];
       const isMergedBlock = segments.length > 1;
+      // 只有“标签就是源码原文”的语句节点才允许回写编辑
+      const editable =
+        node.location &&
+        !EnhancedMermaidGenerator.NON_EDITABLE_TYPES.has(node.nodeType as NodeType) &&
+        !EnhancedMermaidGenerator.isSyntheticLabel(node.label);
+      const editAttrs = editable
+        ? ` data-editable="1" data-start="${node.location!.start}" data-end="${node.location!.end}"`
+        : "";
       const codeBlock = isMergedBlock
         ? this.renderSegmentStack(segments)
-        : `<div class="code-label" style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${this.escapeString(node.label)}</div>`;
+        : `<div class="code-label"${editAttrs} style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${this.escapeString(node.label)}</div>`;
       const label = node.comment
-        ? `<div class="code-comment" style="display:table;max-width:100%;margin:0 auto;padding:2px 4px 5px;text-align:left">${this.escapeString(node.comment)}</div>${codeBlock}`
+        ? `<div class="code-comment" style="display:table;max-width:100%;margin:0 auto;padding:2px 4px 5px;text-align:left">${this.renderCommentLines(node.commentRaw, node.comment)}</div>${codeBlock}`
         : codeBlock;
 
       this.sb.append("    ");
@@ -130,11 +179,9 @@ export class EnhancedMermaidGenerator {
 
       if (edge.label) {
         const normalizedLabel = edge.label.trim().toLowerCase();
-        const displayLabel = normalizedLabel === "true"
-          ? "✔️"
-          : normalizedLabel === "false"
-            ? "✖"
-            : edge.label;
+        // if 的 true/false 与 switch 的 match/no match 统一成勾和叉
+        const displayLabel =
+          EnhancedMermaidGenerator.EDGE_LABEL_GLYPHS[normalizedLabel] ?? edge.label;
         const label = this.escapeString(displayLabel);
         this.sb.append(' -- "');
         this.sb.append(label);
@@ -213,13 +260,29 @@ export class EnhancedMermaidGenerator {
         "white-space:nowrap",
         "cursor:pointer",
       ];
-      const comment = segment.comment
-        ? `<div class="code-cell-comment" style="padding-bottom:1px;margin-bottom:1px;border-bottom:1px dashed rgba(128,128,128,0.45);font-size:0.85em;font-style:italic;color:var(--vscode-descriptionForeground,#9aa0a6)">${this.escapeString(segment.comment)}</div>`
+      const commentLines = (segment.commentRaw ?? segment.comment ?? "")
+        .split(/\r?\n/)
+        .map((line) => this.escapeString(line))
+        .filter((line) => line.length > 0);
+      const comment = commentLines.length > 0
+        ? `<div class="code-cell-comment" style="padding-bottom:1px;margin-bottom:1px;border-bottom:1px dashed rgba(128,128,128,0.45);font-size:0.85em;font-style:italic;color:var(--vscode-descriptionForeground,#9aa0a6)">${commentLines.map((line) => `<div>${line}</div>`).join("")}</div>`
         : "";
       const code = `<div class="code-cell-code">${this.escapeString(segment.code)}</div>`;
-      return `<div class="code-cell" data-start="${segment.start}" data-end="${segment.end}" style="${styles.join(";")}">${comment}${code}</div>`;
+      return `<div class="code-cell" data-editable="1" data-start="${segment.start}" data-end="${segment.end}" style="${styles.join(";")}">${comment}${code}</div>`;
     });
     return `<div class="code-stack" style="display:flex;flex-direction:column;align-items:stretch;margin:0;padding:0">${cells.join("")}</div>`;
+  }
+
+  /**
+   * 按行渲染注释：优先使用原始文本，保留行注释或块注释的标记。
+   */
+  private renderCommentLines(raw: string | undefined, fallback: string): string {
+    const text = raw ?? fallback;
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => this.escapeString(line))
+      .filter((line) => line.length > 0);
+    return lines.map((line) => `<div>${line}</div>`).join("");
   }
 
   private generateClassDefinitions(): void {

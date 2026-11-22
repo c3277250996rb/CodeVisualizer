@@ -1,6 +1,7 @@
 import Parser from "web-tree-sitter";
 import { AbstractParser } from "../../common/AbstractParser";
 import {
+  CommentStyle,
   FlowchartIR,
   FlowchartNode,
   FlowchartEdge,
@@ -8,6 +9,7 @@ import {
 } from "../../../ir/ir";
 import { ProcessResult, LoopContext } from "../../common/AstParserTypes";
 import { ensureParserInit } from "../common/ParserInit";
+import type { VariableInfo } from "../../document/SymbolCatalog";
 
 export class CAstParser extends AbstractParser {
   private constructor(parser: Parser) {
@@ -63,6 +65,118 @@ export class CAstParser extends AbstractParser {
     return undefined;
   }
 
+  /**
+   * 收集全局变量与目标函数内的局部变量/参数。
+   */
+  public collectVariables(
+    sourceCode: string,
+    functionName?: string
+  ): { globals: VariableInfo[]; locals: VariableInfo[] } {
+    const tree = this.parser.parse(sourceCode);
+    const globals: VariableInfo[] = [];
+    const locals: VariableInfo[] = [];
+
+    for (const child of tree.rootNode.namedChildren) {
+      if (child.type === "declaration") {
+        this.collectDeclarationVariables(child, "global", globals);
+      }
+    }
+
+    const functions = tree.rootNode.descendantsOfType("function_definition");
+    const target = functionName
+      ? functions.find((f) => {
+          const declarator = f.childForFieldName("declarator");
+          return this.extractFunctionName(declarator) === functionName;
+        })
+      : functions[0];
+
+    if (target) {
+      const declarator = target.childForFieldName("declarator");
+      const parameters = declarator
+        ? declarator.descendantsOfType("parameter_declaration")
+        : [];
+      for (const parameter of parameters) {
+        const type = parameter.childForFieldName("type")?.text ?? "";
+        const parameterDeclarator = parameter.childForFieldName("declarator");
+        const name = parameterDeclarator
+          ? this.extractDeclaratorName(parameterDeclarator)
+          : undefined;
+        if (name) {
+          locals.push({
+            name,
+            type,
+            kind: "parameter",
+            start: parameter.startIndex,
+            end: parameter.endIndex,
+          });
+        }
+      }
+
+      const body = target.childForFieldName("body");
+      if (body) {
+        for (const declaration of body.descendantsOfType("declaration")) {
+          this.collectDeclarationVariables(declaration, "local", locals);
+        }
+      }
+    }
+
+    return { globals, locals };
+  }
+
+  private collectDeclarationVariables(
+    declaration: Parser.SyntaxNode,
+    kind: VariableInfo["kind"],
+    out: VariableInfo[]
+  ): void {
+    const type = declaration.childForFieldName("type")?.text ?? "";
+    for (const child of declaration.namedChildren) {
+      if (child.type === "identifier") {
+        out.push({
+          name: child.text,
+          type,
+          kind,
+          start: child.startIndex,
+          end: child.endIndex,
+        });
+        continue;
+      }
+      if (!["init_declarator", "pointer_declarator", "array_declarator"].includes(child.type)) {
+        continue;
+      }
+      const nameNode =
+        child.type === "init_declarator"
+          ? child.childForFieldName("declarator")
+          : child;
+      const name = nameNode ? this.extractDeclaratorName(nameNode) : undefined;
+      if (!name) {
+        continue;
+      }
+      out.push({
+        name,
+        type,
+        kind,
+        initializer:
+          child.type === "init_declarator"
+            ? child.childForFieldName("value")?.text
+            : undefined,
+        start: child.startIndex,
+        end: child.endIndex,
+      });
+    }
+  }
+
+  private extractDeclaratorName(declarator: Parser.SyntaxNode): string | undefined {
+    if (declarator.type === "identifier") {
+      return declarator.text;
+    }
+    const anonymous = declarator.childForFieldName("declarator");
+    if (anonymous) {
+      return this.extractDeclaratorName(anonymous);
+    }
+    const identifier = declarator.children.find((child) => child.type === "identifier");
+    return identifier?.text;
+  }
+
   public generateFlowchart(
     sourceCode: string,
     functionName?: string,
@@ -116,6 +230,12 @@ export class CAstParser extends AbstractParser {
       sourceCode.slice(precedingComment.endIndex, targetNode.startIndex).trim() === ""
       ? this.normalizeComment(precedingComment.text)
       : undefined;
+    const headerCommentRaw = headerComment && precedingComment
+      ? precedingComment.text.trim()
+      : undefined;
+    const headerCommentStyle: CommentStyle | undefined = headerCommentRaw
+      ? (headerCommentRaw.startsWith("//") ? "line" : "block")
+      : undefined;
 
     if (!bodyToProcess) {
       return {
@@ -161,6 +281,11 @@ export class CAstParser extends AbstractParser {
       if (target) {
         const comment = this.normalizeComment(commentNode.text);
         target.comment = target.comment ? `${target.comment} ${comment}` : comment;
+        const raw = commentNode.text.trim();
+        if (raw) {
+          target.commentRaw = target.commentRaw ? `${target.commentRaw}\n${raw}` : raw;
+          target.commentStyle = raw.startsWith("//") ? "line" : "block";
+        }
       }
     }
 
@@ -188,6 +313,8 @@ export class CAstParser extends AbstractParser {
       functionRange: { start: targetNode.startIndex, end: targetNode.endIndex },
       title,
       headerComment,
+      headerCommentRaw,
+      headerCommentStyle,
       entryNodeId: entryId,
       exitNodeId: exitId,
     };

@@ -11,6 +11,7 @@ import {
   DocumentModel,
   DocumentSnapshot,
 } from "../core/document/DocumentModel";
+import { collectSymbols } from "../core/document/SymbolCatalog";
 
 const MERMAID_VERSION = "11.8.0";
 const SVG_PAN_ZOOM_VERSION = "3.6.1";
@@ -82,6 +83,11 @@ export type EditStatementMessage = {
   payload: { start: number; end: number; text: string; original?: string };
 };
 
+export type RevealVariableMessage = {
+  command: "revealVariable";
+  payload: { start: number; end: number };
+};
+
 export type WebviewMessage =
   | HighlightCodeMessage
   | ExportMessage
@@ -95,7 +101,8 @@ export type WebviewMessage =
   | UserInteractionEndMessage
   | WebviewReadyMessage
   | RequestFunctionMessage
-  | EditStatementMessage;
+  | EditStatementMessage
+  | RevealVariableMessage;
 
 export interface FlowchartViewContext {
   isPanel: boolean;
@@ -131,6 +138,8 @@ export abstract class BaseFlowchartProvider {
   protected _lastStructureKey?: string;
   /** 固定展示的函数名；为空时跟随光标。 */
   protected _pinnedFunction?: string;
+  /** 固定模式所属的文档；切到别的文件时固定自动失效。 */
+  protected _pinnedUri?: string;
   /** 上次渲染的文档，用于判断是否切换了文件。 */
   protected _lastDocumentUri?: string;
   /** 交互期间跳过的刷新，交互结束后补做。 */
@@ -353,16 +362,7 @@ export abstract class BaseFlowchartProvider {
 
       case "userInteractionEnd": {
         this._userInteracting = false;
-        if (this._pendingUpdate) {
-          this._pendingUpdate = false;
-          const uri = this._currentDocument?.uri.toString();
-          const editor = uri
-            ? vscode.window.visibleTextEditors.find(
-                (candidate) => candidate.document.uri.toString() === uri
-              ) ?? vscode.window.activeTextEditor
-            : vscode.window.activeTextEditor;
-          await this.updateView(editor);
-        }
+        await this.flushPendingUpdate();
         break;
       }
 
@@ -374,13 +374,42 @@ export abstract class BaseFlowchartProvider {
 
       case "requestFunction": {
         this._pinnedFunction = message.payload.name;
+        this._pinnedUri = this._pinnedFunction
+          ? this._currentDocument?.uri.toString()
+          : undefined;
         this._documentModel.invalidate();
-        await this.updateView(vscode.window.activeTextEditor);
+        // 焦点在 webview 时 activeTextEditor 为空，优先用正在渲染的那份文档的编辑器
+        const pinnedDocumentUri = this._currentDocument?.uri.toString();
+        const pinnedEditor =
+          (pinnedDocumentUri
+            ? vscode.window.visibleTextEditors.find(
+                (candidate) => candidate.document.uri.toString() === pinnedDocumentUri
+              )
+            : undefined) ?? vscode.window.activeTextEditor;
+        await this.updateView(pinnedEditor);
         break;
       }
 
       case "editStatement": {
         await this.handleEditStatement(message.payload);
+        break;
+      }
+
+      case "revealVariable": {
+        const document = this._currentDocument;
+        const editor = document
+          ? vscode.window.visibleTextEditors.find(
+              (candidate) => candidate.document.uri.toString() === document.uri.toString()
+            )
+          : vscode.window.activeTextEditor;
+        if (document && editor) {
+          const range = new vscode.Range(
+            document.positionAt(message.payload.start),
+            document.positionAt(message.payload.end)
+          );
+          editor.selection = new vscode.Selection(range.start, range.end);
+          editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+        }
         break;
       }
     }
@@ -557,17 +586,19 @@ export abstract class BaseFlowchartProvider {
     const cached = this._documentModel.get(
       uri,
       document.version,
-      this._pinnedFunction
+      this._pinnedFunction,
+      position
     );
     if (cached) {
       return cached;
     }
 
+    // 固定函数模式必须让函数名生效，跟着光标传 position 会被解析器优先采用
     const ir = await analyzeCode(
       document.getText(),
       document.languageId,
       this._pinnedFunction,
-      position
+      this._pinnedFunction ? undefined : position
     );
 
     const snapshot: DocumentSnapshot = {
@@ -577,7 +608,8 @@ export abstract class BaseFlowchartProvider {
       functionName: this._pinnedFunction,
       ir,
       metrics: MetricsAnalyzer.analyze(ir, document.getText()),
-      headerComment: ir.headerComment,
+      headerComment: ir.headerCommentRaw ?? ir.headerComment,
+      symbols: collectSymbols(document.getText(), document.languageId, this._pinnedFunction),
       structureKey: buildStructureKey(ir),
     };
     this._documentModel.store(snapshot);
@@ -705,6 +737,8 @@ export abstract class BaseFlowchartProvider {
 
     // Prevent multiple simultaneous updates
     if (this._isUpdating) {
+      // 正在渲染时不要丢掉这次请求，标记一下让本次渲染结束后补做
+      this._pendingUpdate = true;
       return;
     }
 
@@ -722,6 +756,12 @@ export abstract class BaseFlowchartProvider {
 
     const position = editor.document.offsetAt(editor.selection.active);
     const document = editor.document;
+
+    // 固定函数只对当初选择它的那份文档有意义，切到别的文件自动回到跟随光标
+    if (this._pinnedFunction && this._pinnedUri !== document.uri.toString()) {
+      this._pinnedFunction = undefined;
+      this._pinnedUri = undefined;
+    }
 
     // Check if we need to update - avoid unnecessary regeneration
     const shouldUpdate = this._shouldUpdate(document, position);
@@ -798,6 +838,15 @@ export abstract class BaseFlowchartProvider {
         });
         webview.postMessage({ command: "llmAvailability", payload: availability });
       }
+      webview.postMessage({
+        command: "applySymbols",
+        payload: {
+          functions: snapshot.symbols.functions,
+          globals: snapshot.symbols.globals,
+          locals: snapshot.symbols.locals,
+          pinnedFunction: this._pinnedFunction,
+        },
+      });
       this._lastStructureKey = snapshot.structureKey;
       this._lastDocumentUri = document.uri.toString();
 
@@ -818,7 +867,30 @@ export abstract class BaseFlowchartProvider {
       this._lastStructureKey = undefined;
     } finally {
       this._isUpdating = false;
+      if (this._pendingUpdate) {
+        // 渲染期间被推迟的请求：用微任务补一次，避免递归等待
+        void Promise.resolve().then(() => this.flushPendingUpdate());
+      }
     }
+  }
+
+  /**
+   * 补做渲染期间被推迟的更新（切换文件、快速移动光标等）。
+   */
+  private async flushPendingUpdate(): Promise<void> {
+    if (!this._pendingUpdate) {
+      return;
+    }
+    this._pendingUpdate = false;
+    const renderedUri = this._currentDocument?.uri.toString();
+    const editor =
+      vscode.window.activeTextEditor ??
+      (renderedUri
+        ? vscode.window.visibleTextEditors.find(
+            (candidate) => candidate.document.uri.toString() === renderedUri
+          )
+        : undefined);
+    await this.updateView(editor);
   }
 
   /**
@@ -841,6 +913,11 @@ export abstract class BaseFlowchartProvider {
     // Update if document version changed (content was modified)
     if (this._currentVersion !== document.version) {
       return true;
+    }
+
+    // 固定函数模式：函数由下拉框决定，光标在同文件内移动不需要重算
+    if (this._pinnedFunction) {
+      return false;
     }
 
     // Update if we moved to a different function or there's no current function range
@@ -983,6 +1060,17 @@ export abstract class BaseFlowchartProvider {
             .mermaid .code-cell-comment {
               font-style: italic;
             }
+            /* 行内编辑：去掉行分隔线与底色，只留输入框自己的描边 */
+            .mermaid .code-cell.is-editing {
+              border-top-color: transparent !important;
+              background: transparent !important;
+              box-shadow: none !important;
+            }
+            /* 编辑框的字体、内边距、宽度全部由 startCodeEdit 逐条内联复制，
+               这里不能再写 !important 的 inherit，否则会盖掉内联值 */
+            .mermaid .code-cell-editor {
+              font-variant-ligatures: none;
+            }
             .mermaid .boolean-edge-label,
             .mermaid .boolean-edge-label * {
               font-family: 'Segoe UI Symbol', sans-serif !important;
@@ -1066,9 +1154,10 @@ export abstract class BaseFlowchartProvider {
             ${ this.getStylesForControls(context) }
         </style>
     </head>
-    <body>
+    <body class="vars-open">
         ${ this.getHtmlForControls(context, codeMetrics) }
       ${headerCommentPanel}
+        ${ this.getHtmlForVarsPanel() }
         <div id="container">
             <div class="mermaid">${flowchartSyntax}</div>
         </div>
@@ -1121,7 +1210,7 @@ export abstract class BaseFlowchartProvider {
                 });
             }
 
-            // 记录当前视口：缩放、pan，以及离视口中心最近的节点及其相对偏移
+            // 记录当前视口：缩放与平移量，重渲染后原样还回去
             function captureViewState() {
                 if (!panZoomInstance) {
                     return null;
@@ -1130,70 +1219,27 @@ export abstract class BaseFlowchartProvider {
                 if (!svg) {
                     return null;
                 }
-                const zoom = panZoomInstance.getZoom();
-                const pan = panZoomInstance.getPan();
-                const vb = svg.getBoundingClientRect();
-                const centerX = vb.left + vb.width / 2;
-                const centerY = vb.top + vb.height / 2;
-                let anchorId = null;
-                let anchorOffset = null;
-                let best = Infinity;
-                svg.querySelectorAll('.node').forEach((node) => {
-                    const r = node.getBoundingClientRect();
-                    const dx = (r.left + r.width / 2) - centerX;
-                    const dy = (r.top + r.height / 2) - centerY;
-                    const distance = Math.hypot(dx, dy);
-                    if (distance < best) {
-                        best = distance;
-                        anchorId = node.id;
-                        anchorOffset = { x: dx, y: dy };
-                    }
-                });
-                return { zoom, pan, anchorNodeId: anchorId, anchorOffset };
+                return {
+                    zoom: panZoomInstance.getZoom(),
+                    pan: panZoomInstance.getPan(),
+                };
             }
 
-            // 重渲染后恢复视口：结构未变时直接还原 pan；结构变了则按锚点节点重新定位
-            function restoreViewState(state, structureChanged) {
+            // 重渲染后恢复视口：编辑引起的刷新一律保持缩放比例和位置，
+            // 只有用户自己的缩放/平移操作（以及切文件）才能改变视口
+            function restoreViewState(state) {
                 if (!panZoomInstance || !state) {
                     return;
                 }
-                panZoomInstance.zoom(state.zoom);
-                if (!structureChanged && state.pan) {
-                    panZoomInstance.pan(state.pan);
-                    return;
-                }
-                const anchorNode = state.anchorNodeId ? document.getElementById(state.anchorNodeId) : null;
-                if (!anchorNode) {
-                    panZoomInstance.center();
-                    return;
-                }
-                const svg = document.querySelector('.mermaid svg');
-                if (!svg) {
-                    return;
-                }
-                const vb = svg.getBoundingClientRect();
-                const targetX = vb.left + vb.width / 2 + (state.anchorOffset ? state.anchorOffset.x : 0);
-                const targetY = vb.top + vb.height / 2 + (state.anchorOffset ? state.anchorOffset.y : 0);
-                let attempts = 0;
-                const centerAnchor = () => {
-                    const r = anchorNode.getBoundingClientRect();
-                    const dx = targetX - (r.left + r.width / 2);
-                    const dy = targetY - (r.top + r.height / 2);
-                    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) {
-                        return true;
+                const apply = () => {
+                    panZoomInstance.zoom(state.zoom);
+                    if (state.pan) {
+                        panZoomInstance.pan(state.pan);
                     }
-                    const pan = panZoomInstance.getPan();
-                    panZoomInstance.pan({ x: pan.x + dx, y: pan.y + dy });
-                    return false;
                 };
-                const step = () => {
-                    attempts += 1;
-                    if (centerAnchor() || attempts >= 3) {
-                        return;
-                    }
-                    requestAnimationFrame(step);
-                };
-                requestAnimationFrame(step);
+                apply();
+                // mermaid 布局可能还有一帧的收尾，下一帧再对齐一次
+                requestAnimationFrame(apply);
             }
 
             function updateLlmToggle(llmApplied) {
@@ -1253,7 +1299,7 @@ export abstract class BaseFlowchartProvider {
                                         hl.classList.add('highlighted');
                                     }
                                 }
-                                restoreViewState(state, !!opts.structureChanged);
+                                restoreViewState(state);
                             } else if (attempts < 20) {
                                 attempts += 1;
                                 setTimeout(checkAndSetup, 100);
@@ -1298,7 +1344,6 @@ export abstract class BaseFlowchartProvider {
                     case 'applyMermaid': {
                         renderGraphSource(message.payload.mermaid, {
                             preserveView: message.payload.preserveView !== false,
-                            structureChanged: message.payload.structureChanged !== false,
                             llmApplied: typeof message.payload.llmApplied === 'boolean' ? message.payload.llmApplied : undefined,
                         });
                         if (message.payload.metrics) {
@@ -1321,6 +1366,10 @@ export abstract class BaseFlowchartProvider {
                         if (!message.payload.ok) {
                             console.warn('[CodeVisualizer] edit rejected:', message.payload.reason);
                         }
+                        break;
+                    }
+                    case 'applySymbols': {
+                        applySymbols(message.payload);
                         break;
                     }
                     case 'llmAvailability': {
@@ -1475,6 +1524,8 @@ export abstract class BaseFlowchartProvider {
                     minZoom: 0.1,
                     maxZoom: 20,
                     zoomScaleSensitivity: 0.2,
+                    // 双击用于进入行内编辑，不能再用作缩放
+                    dblClickZoomEnabled: false,
                     onZoom: function() {
                         notifyInteractionStart();
                         notifyInteractionEnd();
@@ -1718,7 +1769,225 @@ export abstract class BaseFlowchartProvider {
                         event.stopPropagation();
                         onNodeClick(start, end);
                     });
+                    cell.addEventListener('dblclick', (event) => {
+                        event.stopPropagation();
+                        startCodeEdit(cell.querySelector('.code-cell-code'), start, end);
+                    });
                 });
+
+                // 单条语句节点：双击同样进入行内编辑
+                svgElement.querySelectorAll('.code-label[data-start]').forEach((label) => {
+                    const start = Number(label.getAttribute('data-start'));
+                    const end = Number(label.getAttribute('data-end'));
+                    if (!isFinite(start) || !isFinite(end)) {
+                        return;
+                    }
+                    label.addEventListener('dblclick', (event) => {
+                        event.stopPropagation();
+                        startCodeEdit(label, start, end);
+                    });
+                });
+            }
+
+            function applySymbols(payload) {
+                const select = document.getElementById('function-select');
+                if (select) {
+                    const current = payload.pinnedFunction || '';
+                    const options = ['<option value="">Follow cursor</option>'];
+                    (payload.functions || []).forEach((fn) => {
+                        options.push('<option value="' + fn.name + '">' + fn.name + '</option>');
+                    });
+                    select.innerHTML = options.join('');
+                    select.value = current;
+                    if (!select.dataset.bound) {
+                        select.dataset.bound = '1';
+                        select.addEventListener('change', () => {
+                            vscode.postMessage({ command: 'requestFunction', payload: { name: select.value || undefined } });
+                        });
+                    }
+                }
+                renderVariableList('globals-list', payload.globals);
+                renderVariableList('locals-list', payload.locals);
+            }
+
+            function renderVariableList(elementId, items) {
+                const host = document.getElementById(elementId);
+                if (!host) {
+                    return;
+                }
+                host.innerHTML = '';
+                if (!items || items.length === 0) {
+                    const empty = document.createElement('div');
+                    empty.className = 'var-empty';
+                    empty.textContent = '(none)';
+                    host.appendChild(empty);
+                    return;
+                }
+                items.forEach((item) => {
+                    const row = document.createElement('div');
+                    row.className = 'var-item';
+                    const label = (item.type ? item.type + ' ' : '') + item.name;
+                    row.textContent = label;
+                    row.title = label + (item.initializer ? ' = ' + item.initializer : '');
+                    row.addEventListener('click', () => {
+                        vscode.postMessage({ command: 'revealVariable', payload: { start: item.start, end: item.end } });
+                    });
+                    host.appendChild(row);
+                });
+            }
+
+            // 用同字体的隐藏镜像量文本宽度，让编辑框的内容区宽度和原文本完全一致
+            // 镜像必须挂到 body 上：代码行是 display:table，绝对定位子元素在里面量出来是 0
+            function measureTextWidth(text, fontCss) {
+                const mirror = document.createElement('span');
+                mirror.style.cssText = 'position:absolute;left:-10000px;top:0;display:inline-block;visibility:hidden;white-space:pre;padding:0;margin:0;border:0;' + fontCss;
+                mirror.textContent = text.length > 0 ? text : ' ';
+                document.body.appendChild(mirror);
+                const width = mirror.getBoundingClientRect().width;
+                mirror.remove();
+                return width;
+            }
+
+            // 双击进入行内编辑，提交后写回源码
+            // 只有真实语句行可编辑：Start / End / Loop End 这类合成节点没有可写回的语句。
+            // 合并块内传入的是 .code-cell-code，标记在父级 .code-cell 上，所以用 closest 判断
+            function startCodeEdit(element, start, end) {
+                if (!element || element.dataset.editing === '1' || !isFinite(start) || !isFinite(end)) {
+                    return;
+                }
+                if (!element.closest('[data-editable="1"]')) {
+                    return;
+                }
+                const original = element.textContent || '';
+                const hostCell = element.closest('.code-cell') || element;
+                const computed = window.getComputedStyle(element);
+                const padLeft = parseFloat(computed.paddingLeft) || 0;
+                const padRight = parseFloat(computed.paddingRight) || 0;
+                const lineHeight = parseFloat(computed.lineHeight) || (parseFloat(computed.fontSize) || 12) * 1.4;
+                // 原文本的排版参数逐条复制，父级（mermaid 标签壳）字体不同也不会跑偏
+                const fontCss = [
+                    'font-family:' + computed.fontFamily,
+                    'font-size:' + computed.fontSize,
+                    'font-weight:' + computed.fontWeight,
+                    'font-style:' + computed.fontStyle,
+                    'letter-spacing:' + computed.letterSpacing,
+                    'line-height:' + computed.lineHeight,
+                    'tab-size:' + computed.tabSize,
+                ].join(';');
+                const minHeight = Math.max(Math.ceil(lineHeight), element.offsetHeight || 0);
+
+                element.dataset.editing = '1';
+                element.style.display = 'none';
+                hostCell.classList.add('is-editing');
+
+                const editor = document.createElement('textarea');
+                editor.className = 'code-cell-editor';
+                editor.rows = 1;
+                editor.spellcheck = false;
+                editor.value = original;
+                // 不用 border：描边改成内阴影，避免进入编辑时文本位置偏移
+                editor.style.cssText = [
+                    'display:block',
+                    'box-sizing:border-box',
+                    'margin:0',
+                    'padding:' + computed.paddingTop + ' ' + padRight + 'px 0 ' + padLeft + 'px',
+                    'color:var(--vscode-input-foreground,#cccccc)',
+                    'background:var(--vscode-input-background,#1e1e1e)',
+                    'border:0',
+                    'box-shadow:inset 0 0 0 1px var(--vscode-focusBorder,#0a84ff)',
+                    'outline:none',
+                    'resize:none',
+                    'overflow:hidden',
+                    'appearance:none',
+                    '-webkit-appearance:none',
+                    'white-space:pre',
+                    'text-align:left',
+                    'flex:none',
+                    fontCss,
+                ].join(';');
+                element.parentNode.insertBefore(editor, element.nextSibling);
+
+                // 宽度跟着文本走，输入时同步变宽，始终与内容等宽
+                const resize = () => {
+                    const textWidth = measureTextWidth(editor.value, fontCss);
+                    editor.style.width = (textWidth + padLeft + padRight) + 'px';
+                    editor.style.height = 'auto';
+                    editor.style.height = Math.max(minHeight, editor.scrollHeight) + 'px';
+                };
+                editor.addEventListener('input', resize);
+                resize();
+
+                // 编辑框内的鼠标事件一律不外传：否则拖动选字会变成平移画布
+                ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'click', 'dblclick', 'auxclick', 'wheel', 'touchstart', 'touchmove'].forEach((type) => {
+                    editor.addEventListener(type, (event) => event.stopPropagation());
+                });
+                if (panZoomInstance) {
+                    try {
+                        panZoomInstance.disablePan();
+                    } catch (error) {
+                        console.warn('[CodeVisualizer] disable pan failed:', error);
+                    }
+                }
+
+                editor.focus();
+                // 未选状态：只放光标不选中，避免误输入直接覆盖原文
+                const caret = editor.value.length;
+                editor.setSelectionRange(caret, caret);
+
+                let finished = false;
+                const finish = (commit) => {
+                    if (finished) {
+                        return;
+                    }
+                    finished = true;
+                    document.removeEventListener('mousedown', finishOnOutside, true);
+                    document.removeEventListener('pointerdown', finishOnOutside, true);
+                    document.removeEventListener('touchstart', finishOnOutside, true);
+                    window.removeEventListener('blur', finishOnWindowBlur);
+                    const value = editor.value;
+                    editor.remove();
+                    element.style.display = '';
+                    delete element.dataset.editing;
+                    hostCell.classList.remove('is-editing');
+                    if (panZoomInstance) {
+                        try {
+                            panZoomInstance.enablePan();
+                        } catch (error) {
+                            console.warn('[CodeVisualizer] enable pan failed:', error);
+                        }
+                    }
+                    if (commit && value !== original) {
+                        vscode.postMessage({
+                            command: 'editStatement',
+                            payload: { start, end, text: value },
+                        });
+                    }
+                };
+                // 点击编辑框以外的任何地方都结束编辑：画布 mousedown 被 preventDefault，
+                // 焦点不会离开 textarea，blur 不触发，所以必须在捕获阶段自己判断
+                const finishOnOutside = (event) => {
+                    const target = event.target;
+                    if (target === editor || (target instanceof Node && editor.contains(target))) {
+                        return;
+                    }
+                    finish(true);
+                };
+                const finishOnWindowBlur = () => finish(true);
+                document.addEventListener('mousedown', finishOnOutside, true);
+                document.addEventListener('pointerdown', finishOnOutside, true);
+                document.addEventListener('touchstart', finishOnOutside, true);
+                window.addEventListener('blur', finishOnWindowBlur);
+                editor.addEventListener('keydown', (event) => {
+                    event.stopPropagation();
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        finish(true);
+                    } else if (event.key === 'Escape') {
+                        event.preventDefault();
+                        finish(false);
+                    }
+                });
+                editor.addEventListener('blur', () => finish(true));
             }
 
             window.addEventListener('load', () => {
@@ -2015,6 +2284,60 @@ export abstract class BaseFlowchartProvider {
             border: 1px solid var(--vscode-button-border, transparent);
             padding: 5px 10px; cursor: pointer; border-radius: 4px; font-size: 11px;
         }
+        #function-select {
+            max-width: 190px;
+            background: var(--vscode-dropdown-background);
+            color: var(--vscode-dropdown-foreground);
+            border: 1px solid var(--vscode-dropdown-border);
+            border-radius: 4px;
+            font-size: 11px;
+            padding: 3px 6px;
+        }
+        #vars-panel {
+            position: fixed;
+            top: 60px;
+            left: 10px;
+            bottom: 10px;
+            width: 200px;
+            z-index: 999;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding: 8px;
+            overflow: auto;
+            font-size: 11px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 8px;
+        }
+        #vars-panel h4 {
+            margin: 2px 0 4px;
+            font-size: 11px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--vscode-descriptionForeground);
+        }
+        #vars-panel .var-item {
+            padding: 2px 4px;
+            border-radius: 3px;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-family: 'JetBrains Mono', Consolas, monospace !important;
+        }
+        #vars-panel .var-item:hover {
+            background: var(--hover-fill);
+        }
+        #vars-panel .var-empty {
+            padding: 2px 4px;
+            color: var(--vscode-descriptionForeground);
+        }
+        body.vars-open #container {
+            padding-left: 214px;
+            box-sizing: border-box;
+        }
         #export-controls button:hover, #open-panel-btn:hover {
             background-color: var(--vscode-button-hoverBackground);
         }
@@ -2129,6 +2452,20 @@ export abstract class BaseFlowchartProvider {
   /**
    * Helper to generate HTML for controls.
    */
+  /**
+   * 左侧变量面板：上面全局变量，下面当前函数局部变量。
+   */
+  private getHtmlForVarsPanel(): string {
+    return `
+        <aside id="vars-panel">
+            <h4>Globals</h4>
+            <div id="globals-list"></div>
+            <h4>Locals</h4>
+            <div id="locals-list"></div>
+        </aside>
+    `;
+  }
+
   private getHtmlForControls(context: any, codeMetrics?: CodeMetrics): string {
     const toolbarToggleButton = `
         <button id="toolbar-toggle" title="Show toolbar" aria-label="Show toolbar">☰</button>
@@ -2178,6 +2515,7 @@ export abstract class BaseFlowchartProvider {
             <div id="panel-controls">
                 <div>Flowchart Viewer</div>
                 <div id="export-controls">
+                    <select id="function-select" title="Select function"></select>
                     <button id="copy-mermaid" title="Copy Mermaid Code">Copy Code</button>
                     <button id="export-svg" title="Export as SVG">SVG</button>
                     <button id="export-png" title="Export as PNG">PNG</button>

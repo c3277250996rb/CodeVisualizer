@@ -1,5 +1,6 @@
 import { FlowchartIR } from "../../ir/ir";
 import { CodeMetrics } from "../utils/MetricsAnalyzer";
+import { SymbolSummary } from "./SymbolCatalog";
 
 /**
  * 单个文档的分析快照：解析结果、指标与结构签名。
@@ -14,6 +15,8 @@ export interface DocumentSnapshot {
   ir: FlowchartIR;
   metrics: CodeMetrics;
   headerComment?: string;
+  /** 函数列表与变量汇总（左栏、函数下拉、目录树共用）。 */
+  symbols: SymbolSummary;
   /** 节点/边集合签名，用于判断重新渲染是否会改变布局结构。 */
   structureKey: string;
 }
@@ -40,22 +43,37 @@ export class DocumentModel {
   private readonly snapshots = new Map<string, DocumentSnapshot>();
 
   /**
-   * 取快照；版本或目标函数不匹配时返回 undefined。
+   * 取快照；版本、目标函数或光标所在函数不匹配时返回 undefined。
+   * 跟随光标模式下必须传 position：同一版本文档里光标换到另一个函数也要重算，
+   * 否则画布会一直停在第一次渲染的那个函数上。
    */
   public get(
     uri: string,
     version: number,
-    functionName: string | undefined
+    functionName: string | undefined,
+    position?: number
   ): DocumentSnapshot | undefined {
     const snapshot = this.snapshots.get(uri);
     if (!snapshot) {
       return undefined;
     }
+    if (snapshot.version !== version) {
+      return undefined;
+    }
     const sameFunction = (snapshot.functionName ?? "") === (functionName ?? "");
-    if (snapshot.version === version && sameFunction) {
+    if (!sameFunction) {
+      return undefined;
+    }
+    // 固定函数模式：目标函数由 functionName 决定，与光标无关
+    if (functionName) {
       return snapshot;
     }
-    return undefined;
+    // 跟随光标模式：缓存里的函数范围必须覆盖当前光标
+    const range = snapshot.ir.functionRange;
+    if (!range || position === undefined) {
+      return undefined;
+    }
+    return position >= range.start && position <= range.end ? snapshot : undefined;
   }
 
   public store(snapshot: DocumentSnapshot): void {

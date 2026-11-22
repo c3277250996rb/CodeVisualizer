@@ -47,14 +47,22 @@ export interface NodeSegment {
   end: number;
   /** 该语句自己的注释（已拼成单行）。 */
   comment?: string;
+  /** 原始注释文本（保留行注释或块注释的原始标记）。 */
+  commentRaw?: string;
+  commentStyle?: CommentStyle;
   /** 该语句的展示文本（已拼成单行）。 */
   code: string;
 }
+
+export type CommentStyle = "line" | "block";
 
 export interface FlowchartNode {
   id: string;
   label: string;
   comment?: string;
+  /** 原始注释文本（保留标记与换行），用于编辑与保真展示。 */
+  commentRaw?: string;
+  commentStyle?: CommentStyle;
   location?: Location;
   shape?: "rect" | "diamond" | "round" | "stadium";
   style?: string;
@@ -89,4 +97,7 @@ export interface FlowchartIR {
   functionRange?: { start: number; end: number };
   title?: string;
   headerComment?: string;
+  /** 函数头注释原文（保留标记）。 */
+  headerCommentRaw?: string;
+  headerCommentStyle?: CommentStyle;
 }

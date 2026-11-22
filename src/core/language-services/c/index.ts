@@ -37,6 +37,19 @@ export function listCFunctions(sourceCode: string): string[] {
   return cParser.listFunctions(sourceCode);
 }
 
+export function collectCVariables(
+  sourceCode: string,
+  functionName?: string
+): { globals: import("../../document/SymbolCatalog").VariableInfo[]; locals: import("../../document/SymbolCatalog").VariableInfo[] } {
+  if (!cParser) {
+    throw new Error(
+      "C language service not initialized. Call initCLanguageService first."
+    );
+  }
+
+  return cParser.collectVariables(sourceCode, functionName);
+}
+
 export function findCFunctionAtPosition(
   sourceCode: string,
   position: number

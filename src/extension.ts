@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { FlowchartViewProvider } from "./view/FlowchartViewProvider";
 import { FlowchartPanelProvider } from "./view/FlowchartPanelProvider";
 import { CodebaseFlowProvider } from "./view/CodebaseFlowProvider";
+import { OutlineProvider } from "./view/OutlineProvider";
 import { initLanguageServices } from "./core/language-services";
 import { LLMManager } from "./core/llm/LLMManager";
 import { setExtensionContext } from "./core/llm/LLMContext";
@@ -35,6 +36,30 @@ export async function activate(context: vscode.ExtensionContext) {
       FlowchartViewProvider.viewType,
       sidebarProvider
     )
+  );
+
+  // Register project outline tree (file -> function -> decision)
+  const outlineProvider = new OutlineProvider();
+  context.subscriptions.push(
+    vscode.window.registerTreeDataProvider("codevisualizer.outline", outlineProvider)
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "codevisualizer.revealOutlineNode",
+      async (uri: vscode.Uri, range: vscode.Range) => {
+        const document = await vscode.workspace.openTextDocument(uri);
+        const editor = await vscode.window.showTextDocument(document, {
+          preview: false,
+        });
+        if (range) {
+          editor.selection = new vscode.Selection(range.start, range.end);
+          editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+        }
+      }
+    )
+  );
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(() => outlineProvider.refresh())
   );
 
   // Register panel commands

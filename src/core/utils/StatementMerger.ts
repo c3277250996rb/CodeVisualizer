@@ -119,6 +119,8 @@ export class StatementMerger {
     const toSegments = StatementMerger.toSegments(to);
     from.segments = [...fromSegments, ...toSegments];
     from.comment = undefined;
+    from.commentRaw = undefined;
+    from.commentStyle = undefined;
     from.label = from.segments.map((segment) => segment.code).join("\n");
 
     if (from.location && to.location) {
@@ -170,6 +172,8 @@ export class StatementMerger {
       start: node.location?.start ?? 0,
       end: node.location?.end ?? 0,
       comment: node.comment ? StatementMerger.toSingleLine(node.comment) : undefined,
+      commentRaw: node.commentRaw,
+      commentStyle: node.commentStyle,
       code: StatementMerger.toSingleLine(node.label),
     }];
   }
