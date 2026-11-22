@@ -14,7 +14,6 @@ export interface DocumentSnapshot {
   functionName?: string;
   ir: FlowchartIR;
   metrics: CodeMetrics;
-  headerComment?: string;
   /** 函数列表与变量汇总（左栏、函数下拉、目录树共用）。 */
   symbols: SymbolSummary;
   /** 节点/边集合签名，用于判断重新渲染是否会改变布局结构。 */

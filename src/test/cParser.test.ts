@@ -59,21 +59,16 @@ suite("C flowchart parser", () => {
     const flowchart = parser.generateFlowchart(source, "sum_positive");
 
     assert.strictEqual(flowchart.title, "Flowchart for function: sum_positive");
-    assert.strictEqual(flowchart.headerComment, "Function summary.");
-    assert.strictEqual(flowchart.nodes.find((node) => node.nodeType === NodeType.ENTRY)?.comment, undefined);
-    const decisionCommentNode = flowchart.nodes.find(
-      (node) => node.nodeType === NodeType.DECISION && node.comment?.includes("Reject non-positive input")
-    );
-    assert.ok(decisionCommentNode);
     assert.ok(flowchart.nodes.some((node) => node.nodeType === NodeType.DECISION));
     assert.ok(flowchart.edges.length > 0);
 
     const mermaid = new EnhancedMermaidGenerator().generate(flowchart);
-    assert.ok(mermaid.includes('class="code-comment"'));
-    assert.ok(mermaid.includes("Reject non-positive input"));
+    // 注释识别已彻底移除：源码里的注释不应出现在任何节点上
+    assert.ok(!mermaid.includes("code-comment"));
+    assert.ok(!mermaid.includes("Function summary."));
+    assert.ok(!mermaid.includes("Reject non-positive input"));
     assert.ok(mermaid.includes(String.fromCodePoint(0x2714, 0xfe0f)));
     assert.ok(mermaid.includes(String.fromCodePoint(0x2716)));
-    assert.ok(!mermaid.includes("- - - -"));
   });
   }
 

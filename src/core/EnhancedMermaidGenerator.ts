@@ -159,9 +159,7 @@ export class EnhancedMermaidGenerator {
       const codeBlock = isMergedBlock
         ? this.renderSegmentStack(segments)
         : `<div class="code-label"${editAttrs} style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${this.escapeString(node.label)}</div>`;
-      const label = node.comment
-        ? `<div class="code-comment" style="display:table;max-width:100%;margin:0 auto;padding:2px 4px 5px;text-align:left">${this.renderCommentLines(node.commentRaw, node.comment)}</div>${codeBlock}`
-        : codeBlock;
+      const label = codeBlock;
 
       this.sb.append("    ");
       this.sb.append(node.id);
@@ -287,29 +285,10 @@ export class EnhancedMermaidGenerator {
         "white-space:nowrap",
         "cursor:pointer",
       ];
-      const commentLines = (segment.commentRaw ?? segment.comment ?? "")
-        .split(/\r?\n/)
-        .map((line) => this.escapeString(line))
-        .filter((line) => line.length > 0);
-      const comment = commentLines.length > 0
-        ? `<div class="code-cell-comment" style="padding-bottom:1px;margin-bottom:1px;border-bottom:1px dashed rgba(128,128,128,0.45);font-size:0.85em;font-style:italic;color:var(--vscode-descriptionForeground,#9aa0a6)">${commentLines.map((line) => `<div>${line}</div>`).join("")}</div>`
-        : "";
       const code = `<div class="code-cell-code">${this.escapeString(segment.code)}</div>`;
-      return `<div class="code-cell" data-editable="1" data-start="${segment.start}" data-end="${segment.end}" style="${styles.join(";")}">${comment}${code}</div>`;
+      return `<div class="code-cell" data-editable="1" data-start="${segment.start}" data-end="${segment.end}" style="${styles.join(";")}">${code}</div>`;
     });
     return `<div class="code-stack" style="display:flex;flex-direction:column;align-items:stretch;margin:0;padding:0">${cells.join("")}</div>`;
-  }
-
-  /**
-   * 按行渲染注释：优先使用原始文本，保留行注释或块注释的标记。
-   */
-  private renderCommentLines(raw: string | undefined, fallback: string): string {
-    const text = raw ?? fallback;
-    const lines = text
-      .split(/\r?\n/)
-      .map((line) => this.escapeString(line))
-      .filter((line) => line.length > 0);
-    return lines.map((line) => `<div>${line}</div>`).join("");
   }
 
   private generateClassDefinitions(): void {

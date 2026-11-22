@@ -1,7 +1,6 @@
 import Parser from "web-tree-sitter";
 import { AbstractParser } from "../../common/AbstractParser";
 import {
-  CommentStyle,
   FlowchartIR,
   FlowchartNode,
   FlowchartEdge,
@@ -223,19 +222,6 @@ export class CAstParser extends AbstractParser {
       this.extractFunctionName(declarator) || "[anonymous]"
     );
     const title = `Flowchart for function: ${funcNameStr}`;
-    const precedingComment = tree.rootNode.namedChildren
-      .filter((node) => node.type === "comment" && node.endIndex <= targetNode!.startIndex)
-      .pop();
-    const headerComment = precedingComment &&
-      sourceCode.slice(precedingComment.endIndex, targetNode.startIndex).trim() === ""
-      ? this.normalizeComment(precedingComment.text)
-      : undefined;
-    const headerCommentRaw = headerComment && precedingComment
-      ? precedingComment.text.trim()
-      : undefined;
-    const headerCommentStyle: CommentStyle | undefined = headerCommentRaw
-      ? (headerCommentRaw.startsWith("//") ? "line" : "block")
-      : undefined;
 
     if (!bodyToProcess) {
       return {
@@ -268,27 +254,6 @@ export class CAstParser extends AbstractParser {
     nodes.push(...bodyResult.nodes);
     edges.push(...bodyResult.edges);
 
-    for (const commentNode of bodyToProcess.descendantsOfType("comment")) {
-      const target = nodes
-        .filter(
-          (node) =>
-            node.location &&
-            node.location.start >= commentNode.endIndex &&
-            node.nodeType !== NodeType.LOOP_END
-        )
-        .sort((left, right) => left.location!.start - right.location!.start)[0];
-
-      if (target) {
-        const comment = this.normalizeComment(commentNode.text);
-        target.comment = target.comment ? `${target.comment} ${comment}` : comment;
-        const raw = commentNode.text.trim();
-        if (raw) {
-          target.commentRaw = target.commentRaw ? `${target.commentRaw}\n${raw}` : raw;
-          target.commentStyle = raw.startsWith("//") ? "line" : "block";
-        }
-      }
-    }
-
     edges.push(
       bodyResult.entryNodeId
         ? { from: entryId, to: bodyResult.entryNodeId }
@@ -312,9 +277,6 @@ export class CAstParser extends AbstractParser {
       locationMap: this.locationMap,
       functionRange: { start: targetNode.startIndex, end: targetNode.endIndex },
       title,
-      headerComment,
-      headerCommentRaw,
-      headerCommentStyle,
       entryNodeId: entryId,
       exitNodeId: exitId,
     };
@@ -441,17 +403,6 @@ export class CAstParser extends AbstractParser {
       (child) => child.type === "identifier"
     );
     return identifierChild?.text || null;
-  }
-
-  private normalizeComment(comment: string): string {
-    return comment
-      .replace(/^\/\/+/, "")
-      .replace(/^\/\*+/, "")
-      .replace(/\*\/$/, "")
-      .split(/\r?\n/)
-      .map((line) => line.replace(/^\s*\*\s?/, "").trim())
-      .filter(Boolean)
-      .join(" ");
   }
 
   private processIfStatement(

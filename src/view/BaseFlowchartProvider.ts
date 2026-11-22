@@ -636,7 +636,6 @@ export abstract class BaseFlowchartProvider {
       functionName: this._pinnedFunction,
       ir,
       metrics: MetricsAnalyzer.analyze(ir, document.getText()),
-      headerComment: ir.headerCommentRaw ?? ir.headerComment,
       symbols: collectSymbols(document.getText(), document.languageId, this._pinnedFunction),
       structureKey: buildStructureKey(ir),
     };
@@ -847,8 +846,7 @@ export abstract class BaseFlowchartProvider {
             mermaidCode,
             this.getNonce(),
             availability,
-            snapshot.metrics,
-            snapshot.headerComment
+            snapshot.metrics
           )
         );
         this._htmlRendered = true;
@@ -861,7 +859,6 @@ export abstract class BaseFlowchartProvider {
             preserveView: !documentChanged,
             structureChanged: structureChanged || documentChanged,
             metrics: snapshot.metrics,
-            headerComment: snapshot.headerComment ?? "",
           },
         });
         webview.postMessage({ command: "llmAvailability", payload: availability });
@@ -972,8 +969,7 @@ export abstract class BaseFlowchartProvider {
     flowchartSyntax: string,
     nonce: string,
     llmAvailability?: { enabled: boolean; provider: string; model: string },
-    codeMetrics?: CodeMetrics,
-    headerComment?: string
+    codeMetrics?: CodeMetrics
   ): string {
     const theme =
       vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark
@@ -983,17 +979,6 @@ export abstract class BaseFlowchartProvider {
     const context = this.getViewContext();
 
     const llm = llmAvailability || { enabled: false, provider: "openai", model: "" };
-    const escapedHeaderComment = headerComment
-      ? headerComment.replace(/[&<>"']/g, (character) => ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#39;",
-        })[character]!)
-      : "";
-    // 容器常驻，后续通过消息更新内容与显隐
-    const headerCommentPanel = `<div id="function-comment" tabindex="0"${escapedHeaderComment ? "" : ' style="display:none"'}>${escapedHeaderComment}</div>`;
     return `<!DOCTYPE html>
     <html lang="en">
     <head>
@@ -1042,39 +1027,10 @@ export abstract class BaseFlowchartProvider {
                     : ""
                 }
             }
-              #function-comment {
-                position: fixed;
-                z-index: 5;
-                top: 32px;
-                left: 42px;
-                right: 10px;
-                max-height: 120px;
-                overflow: auto;
-                box-sizing: border-box;
-                padding: 8px 10px;
-                border: 1px solid var(--vscode-panel-border);
-                background: var(--vscode-editor-background);
-                color: var(--vscode-editor-foreground);
-                border-radius: 8px;
-                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
-                font-size: 12px;
-                line-height: 1.45;
-                opacity: 0.78;
-                transition: opacity 0.18s ease;
-                white-space: pre-wrap;
-              }
-              #function-comment:hover,
-              #function-comment:focus {
-                opacity: 1;
-              }
             .mermaid { width: 100%; height: 100%; }
             .mermaid svg { width: 100%; height: 100%; }
             .mermaid .code-label {
               font-family: 'JetBrains Mono', Consolas, monospace !important;
-            }
-            .mermaid .code-comment {
-              font-family: 'JetBrains Mono', Consolas, monospace !important;
-              font-size: 0.85em !important;
             }
             /* 合并块内的行：只做行级反馈，整块轮廓交给节点外框 */
             .mermaid .code-cell {
@@ -1084,12 +1040,8 @@ export abstract class BaseFlowchartProvider {
               background: rgba(255, 165, 0, 0.10) !important;
               box-shadow: inset 2px 0 0 var(--hover-stroke);
             }
-            .mermaid .code-cell:hover .code-cell-code,
-            .mermaid .code-cell:hover .code-cell-comment {
+            .mermaid .code-cell:hover .code-cell-code {
               filter: drop-shadow(0 0 6px var(--hover-stroke));
-            }
-            .mermaid .code-cell-comment {
-              font-style: italic;
             }
             /* 行内编辑：去掉行分隔线与底色，只留输入框自己的描边 */
             .mermaid .code-cell.is-editing {
@@ -1187,7 +1139,6 @@ export abstract class BaseFlowchartProvider {
     </head>
     <body class="vars-open">
         ${ this.getHtmlForControls(context, codeMetrics) }
-      ${headerCommentPanel}
         ${ this.getHtmlForVarsPanel() }
         <div id="container">
             <div class="mermaid">${flowchartSyntax}</div>
@@ -1213,15 +1164,6 @@ export abstract class BaseFlowchartProvider {
             let panZoomInstance = null;
             // 由面板命令触发的节点聚焦处理（setupInteractions 里赋值）
             let focusNodeKindHandler = null;
-
-            function applyHeaderComment(text) {
-                const el = document.getElementById('function-comment');
-                if (!el) {
-                    return;
-                }
-                el.textContent = text || '';
-                el.style.display = text ? '' : 'none';
-            }
 
             function applyMetricsToPanel(metrics) {
                 if (!metrics) {
@@ -1388,13 +1330,6 @@ export abstract class BaseFlowchartProvider {
                         if (message.payload.metrics) {
                             applyMetricsToPanel(message.payload.metrics);
                         }
-                        if (typeof message.payload.headerComment === 'string') {
-                            applyHeaderComment(message.payload.headerComment);
-                        }
-                        break;
-                    }
-                    case 'applyHeaderComment': {
-                        applyHeaderComment(message.payload.text || '');
                         break;
                     }
                     case 'applyMetrics': {
@@ -1495,38 +1430,6 @@ export abstract class BaseFlowchartProvider {
                   if (label.classList.contains('boolean-edge-label')) {
                     label.querySelector('.labelBkg')?.classList.add('boolean-edge-label-bkg');
                   }
-                });
-
-                svgElement.querySelectorAll('.node').forEach((node) => {
-                  node.querySelectorAll('.comment-divider').forEach((divider) => divider.remove());
-
-                  const comment = node.querySelector('.code-comment');
-                  const code = node.querySelector('.code-label');
-                  const matrix = node.getScreenCTM();
-                  if (!comment || !code || !matrix) return;
-
-                  const commentRect = comment.getBoundingClientRect();
-                  const codeRect = code.getBoundingClientRect();
-                  const toNodePoint = (x, y) => {
-                    const point = svgElement.createSVGPoint();
-                    point.x = x;
-                    point.y = y;
-                    return point.matrixTransform(matrix.inverse());
-                  };
-                  const left = toNodePoint(commentRect.left, (commentRect.bottom + codeRect.top) / 2);
-                  const right = toNodePoint(commentRect.right, (commentRect.bottom + codeRect.top) / 2);
-                  const divider = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                  divider.classList.add('comment-divider');
-                  divider.setAttribute('x1', left.x);
-                  divider.setAttribute('y1', left.y);
-                  divider.setAttribute('x2', right.x);
-                  divider.setAttribute('y2', right.y);
-                  divider.setAttribute('stroke', '#8a8a8a');
-                  divider.setAttribute('stroke-width', '1');
-                  divider.setAttribute('stroke-dasharray', '4 3');
-                    divider.style.setProperty('stroke', '#8a8a8a', 'important');
-                  divider.setAttribute('pointer-events', 'none');
-                  node.appendChild(divider);
                 });
 
                 // Track user interaction state for pan/zoom
