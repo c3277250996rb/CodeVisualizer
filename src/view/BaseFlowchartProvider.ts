@@ -1052,10 +1052,15 @@ export abstract class BaseFlowchartProvider {
             .mermaid svg { width: 100%; height: 100%; }
             .mermaid .code-label {
               font-family: 'JetBrains Mono', Consolas, monospace !important;
+              /* JetBrains Mono 的连字会把 != 画成不等号，代码必须原样显示 */
+              font-variant-ligatures: none;
+              font-feature-settings: 'liga' 0, 'calt' 0;
             }
             /* 合并块内的行：只做行级反馈，整块轮廓交给节点外框 */
             .mermaid .code-cell {
               font-family: 'JetBrains Mono', Consolas, monospace !important;
+              font-variant-ligatures: none;
+              font-feature-settings: 'liga' 0, 'calt' 0;
             }
             .mermaid .code-cell:hover {
               background: rgba(255, 165, 0, 0.10) !important;
@@ -1355,6 +1360,30 @@ export abstract class BaseFlowchartProvider {
 
                 updateLlmToggle(opts.llmApplied);
             }
+
+            // 面板/侧边栏宽度变化（拖动分隔条、放大视图）后必须重新适配，
+            // 否则 svg-pan-zoom 还按旧视口平移，图会被裁到视野外
+            let viewportResizeTimer = null;
+            window.addEventListener('resize', () => {
+                if (!panZoomInstance) {
+                    return;
+                }
+                if (viewportResizeTimer) {
+                    clearTimeout(viewportResizeTimer);
+                }
+                viewportResizeTimer = setTimeout(() => {
+                    if (!panZoomInstance) {
+                        return;
+                    }
+                    try {
+                        panZoomInstance.resize();
+                        panZoomInstance.fit();
+                        panZoomInstance.center();
+                    } catch (error) {
+                        console.warn('[CodeVisualizer] refit after resize failed:', error);
+                    }
+                }, 120);
+            });
 
             window.addEventListener('message', event => {
                 const message = event.data;

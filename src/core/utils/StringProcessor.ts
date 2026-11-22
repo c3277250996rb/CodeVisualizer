@@ -7,7 +7,8 @@ export class StringProcessor {
   private static readonly colonRegex = /:$/;
   private static readonly escapeMap: Record<string, string> = {
     '"': "#quot;",
-    "\\": "\\\\",
+    // 单个反斜杠用实体编码：直接写 \\ 会被 mermaid/HTML 再转一次，显示成两个
+    "\\": "#92;",
     "\n": " ",     
     "<": "#60;",
     ">": "#62;",

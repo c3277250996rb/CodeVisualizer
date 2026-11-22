@@ -32,6 +32,7 @@ suite("C flowchart parser", () => {
   const SWITCH_TEST = "SWITCH 切函数时清空画布并重置缩放";
   const ELSE_TEST = "ELSE else 与 else if 要识别成判断分支";
   const LOOPBODY_TEST = "LOOPBODY while 与 do-while 的循环体要逐条展开";
+  const ESCAPE_TEST = "ESCAPE 代码里的 != 与反斜杠要原样显示";
 
   const ANY_TEST = (): boolean =>
     selected(PARSER_TEST) ||
@@ -39,7 +40,8 @@ suite("C flowchart parser", () => {
     selected(VARS_TEST) ||
     selected(SWITCH_TEST) ||
     selected(ELSE_TEST) ||
-    selected(LOOPBODY_TEST);
+    selected(LOOPBODY_TEST) ||
+    selected(ESCAPE_TEST);
 
   suiteSetup(async () => {
     if (!ANY_TEST()) {
@@ -622,6 +624,99 @@ suite("C flowchart parser", () => {
       assert.ok(doPosition > fnPosition, "样例里应有 do_body_sample");
       const doCursor = document.positionAt(doPosition);
       editor.selection = new vscode.Selection(doCursor, doCursor);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      await vscode.window.tabGroups.close(tab);
+      await tryCommand("workbench.action.toggleFullScreen");
+    });
+  }
+
+  // 转义：!= 不能变成不等号，字符串里的反斜杠不能叠成两个
+  if (selected(ESCAPE_TEST)) {
+    test(ESCAPE_TEST, async function () {
+      this.timeout(40000);
+      const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
+      assert.ok(extension, "CodeVisualizer extension should be available in the test host");
+      await extension.activate();
+
+      // 0) 窗口可视环境（不可删）：全屏 + 关掉无关面板
+      const tryCommand = async (command: string): Promise<void> => {
+        try {
+          await vscode.commands.executeCommand(command);
+        } catch (error) {
+          console.warn(`Command ${command} failed: ${error}`);
+        }
+      };
+      await tryCommand("workbench.action.toggleFullScreen");
+      await tryCommand("workbench.action.closeSidebar");
+      await tryCommand("workbench.action.closePanel");
+      await tryCommand("workbench.action.closeAuxiliaryBar");
+
+      const samplePath = path.join(__dirname, "../../test-files/escape_sample.c");
+      const sampleText = require("fs").readFileSync(samplePath, "utf8") as string;
+      const ir = parser.generateFlowchart(sampleText, "escape_sample");
+
+      // 1) L3：IR 里 != 保持原文，反斜杠只用实体编码一次
+      const conditionNode = ir.nodes.find((node) => node.label.includes("value"));
+      assert.ok(conditionNode, "样例里应有 value 的判断节点");
+      assert.ok(conditionNode!.label.includes("!="), `!= 不能变形: ${conditionNode!.label}`);
+      assert.ok(
+        !conditionNode!.label.includes(String.fromCodePoint(0x2260)),
+        `!= 不能渲染成不等号: ${conditionNode!.label}`
+      );
+      const writeNode = ir.nodes.find((node) => node.label.includes("MyUart_WriteString"));
+      assert.ok(writeNode, "样例里应有写字符串节点");
+      assert.ok(
+        !writeNode!.label.includes("\\\\"),
+        `反斜杠不能叠成两个: ${writeNode!.label}`
+      );
+      assert.ok(
+        writeNode!.label.includes("#92;r#92;n"),
+        `反斜杠应编码成单次实体: ${writeNode!.label}`
+      );
+
+      // 2) L2：图源里同样不能出现双反斜杠或不等号
+      const mermaid = new EnhancedMermaidGenerator().generate(ir);
+      assert.ok(mermaid.includes("!="), "图源里 != 必须保持原文");
+      assert.ok(
+        !mermaid.includes(String.fromCodePoint(0x2260)),
+        "图源里不能出现不等号"
+      );
+      assert.ok(!mermaid.includes("\\\\"), "图源里不能出现双反斜杠");
+
+      // 3) L4：小样例整图，实拍确认 != 与 \r\n 原样显示
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(samplePath));
+      let editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      const fnPosition = document.getText().indexOf("escape_sample");
+      assert.ok(fnPosition >= 0, "样例里应有 escape_sample");
+      const cursor = document.positionAt(fnPosition);
+      editor.selection = new vscode.Selection(cursor, cursor);
+
+      await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
+      const isFlowchartPanel = (candidate: vscode.Tab): boolean =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.endsWith("codevisualizer.flowchartPanel");
+      const tab = await waitFor(
+        () =>
+          vscode.window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .find(isFlowchartPanel),
+        10000
+      );
+      assert.ok(tab, "Flowchart webview panel should open");
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      editor = await vscode.window.showTextDocument(document, {
+        viewColumn: vscode.ViewColumn.One,
+        preview: false,
+      });
+      editor.selection = new vscode.Selection(cursor, cursor);
+      // 窄栏里文字太小，先把面板那一列拉宽再实拍
+      await tryCommand("workbench.action.increaseViewSize");
+      await tryCommand("workbench.action.increaseViewSize");
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
       await vscode.window.tabGroups.close(tab);
