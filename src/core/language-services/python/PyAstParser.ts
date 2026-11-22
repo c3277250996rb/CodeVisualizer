@@ -1149,7 +1149,7 @@ export class PyAstParser extends AbstractParser {
       continueNode
     );
     const edges: FlowchartEdge[] = [
-      { from: nodeId, to: loopContext.continueTargetId },
+      { from: nodeId, to: loopContext.continueTargetId, label: "continue" },
     ];
     this.locationMap.push({
       start: continueNode.startIndex,

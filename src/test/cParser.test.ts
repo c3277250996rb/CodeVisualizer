@@ -22,13 +22,29 @@ async function waitFor<T>(probe: () => T | undefined, timeoutMs: number): Promis
 
 suite("C flowchart parser", () => {
   let parser: CAstParser;
+  // test.ps1 -Only 会设置 CODEVISUALIZER_TEST_ONLY，只注册标题包含该关键字的用例
+  const ONLY = (process.env.CODEVISUALIZER_TEST_ONLY || "").trim().toLowerCase();
+  const selected = (title: string): boolean =>
+    ONLY.length === 0 || title.toLowerCase().includes(ONLY);
+  const PARSER_TEST = "generates a flowchart for the commented C sample";
+  const SMOKE_TEST = "opens MyAdc_SendTelemetry and zooms into the loop";
 
   suiteSetup(async () => {
+    if (!selected(PARSER_TEST) && !selected(SMOKE_TEST)) {
+      return;
+    }
     const wasmPath = path.join(__dirname, "../../dist/tree-sitter-c.wasm");
     parser = await CAstParser.create(wasmPath);
   });
 
-  test("generates a flowchart for the commented C sample", () => {
+  if (!selected(PARSER_TEST) && !selected(SMOKE_TEST)) {
+    test("filter matched no tests", () => {
+      assert.fail(`CODEVISUALIZER_TEST_ONLY="${ONLY}" 没有匹配的用例`);
+    });
+  }
+
+  if (selected(PARSER_TEST)) {
+  test(PARSER_TEST, () => {
     const source = [
       "/* Function summary. */",
       "int sum_positive(int value) {",
@@ -59,10 +75,12 @@ suite("C flowchart parser", () => {
     assert.ok(mermaid.includes(String.fromCodePoint(0x2716)));
     assert.ok(!mermaid.includes("- - - -"));
   });
+  }
 
   // 冒烟测试：全屏打开 my_adc.c 的 MyAdc_SendTelemetry，再把循环放大，
   // 让 100ms 实拍能清楚录到真实渲染的画面
-  test("opens MyAdc_SendTelemetry and zooms into the loop", async function () {
+  if (selected(SMOKE_TEST)) {
+  test(SMOKE_TEST, async function () {
     this.timeout(40000);
     const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
     assert.ok(extension, "CodeVisualizer extension should be available in the test host");
@@ -92,6 +110,16 @@ suite("C flowchart parser", () => {
     const position = document.positionAt(functionPosition);
     editor.selection = new vscode.Selection(position, position);
 
+    // 直接用同一份源码校验图源：循环继续线是 🔄，class 语句不能一行带多个类名
+    const mermaid = new EnhancedMermaidGenerator().generate(
+      parser.generateFlowchart(document.getText(), "MyAdc_SendTelemetry")
+    );
+    assert.ok(mermaid.includes(String.fromCodePoint(0x1f504)), "循环继续线应该渲染成 🔄");
+    const multiClassLine = mermaid
+      .split("\n")
+      .find((line) => /^\s*class\s+\S+\s+\S+\s+\S+/.test(line));
+    assert.ok(!multiClassLine, `class 语句每行只能带一个类名: ${multiClassLine}`);
+
     await vscode.commands.executeCommand("codevisualizer.openFlowchartToSide");
 
     // VS Code 会把面板 viewType 加上 mainThreadWebview- 之类的前缀，
@@ -117,4 +145,5 @@ suite("C flowchart parser", () => {
     await vscode.window.tabGroups.close(tab);
     await tryCommand("workbench.action.toggleFullScreen");
   });
+  }
 });

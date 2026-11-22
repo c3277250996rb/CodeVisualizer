@@ -579,7 +579,7 @@ export class GoAstParser extends AbstractParser {
     this.locationMap.push({ start: node.startIndex, end: node.endIndex, nodeId: id });
     result.entryNodeId = id;
     if (loopContext) {
-      result.edges.push({ from: id, to: loopContext.continueTargetId });
+      result.edges.push({ from: id, to: loopContext.continueTargetId, label: "continue" });
       result.nodesConnectedToExit.add(id);
     }
     return result;

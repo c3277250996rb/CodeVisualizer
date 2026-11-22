@@ -2,7 +2,9 @@
 param(
     [switch]$SkipBuild,
     [switch]$FreshProfile,
-    [switch]$NoRecordScreen
+    [switch]$NoRecordScreen,
+    # 只跑标题包含该关键字的用例，例如 -Only MyAdc
+    [string]$Only = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +13,7 @@ $recorder = $null
 $captureDirectory = $null
 $previousUserDataPath = $env:CODEVISUALIZER_TEST_USER_DATA
 $previousCaptureDirectory = $env:CODEVISUALIZER_CAPTURE_DIRECTORY
+$previousOnly = $env:CODEVISUALIZER_TEST_ONLY
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
@@ -42,6 +45,11 @@ try {
         if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'out\test'))) {
             throw '-SkipBuild 但 out/test 不存在：先完整跑一次（去掉 -SkipBuild）或执行 npm run compile-tests'
         }
+    }
+
+    if ($Only) {
+        $env:CODEVISUALIZER_TEST_ONLY = $Only
+        Write-Output "TEST_ONLY=$Only"
     }
 
     # 100ms 实拍是默认行为：录下测试期间窗口真实画面的全过程，只记录不参与成败判定
@@ -107,6 +115,7 @@ finally {
     }
     $env:CODEVISUALIZER_TEST_USER_DATA = $previousUserDataPath
     $env:CODEVISUALIZER_CAPTURE_DIRECTORY = $previousCaptureDirectory
+    $env:CODEVISUALIZER_TEST_ONLY = $previousOnly
     Pop-Location
 }
 

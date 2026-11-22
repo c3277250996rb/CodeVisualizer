@@ -1091,7 +1091,7 @@ export class PhpAstParser extends AbstractParser {
     const id = this.generateNodeId("continue");
     const result = this.createProcessResult(
       [this.createSemanticNode(id, "continue", NodeType.BREAK_CONTINUE, node)],
-      [{ from: id, to: loopContext.continueTargetId }],
+      [{ from: id, to: loopContext.continueTargetId, label: "continue" }],
       id,
       [],
       new Set([id])

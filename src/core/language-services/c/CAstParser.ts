@@ -671,14 +671,15 @@ export class CAstParser extends AbstractParser {
         });
       }
 
-      // Connect body exit to update or condition
+      // Connect body exit to update or condition（这条就是循环继续的那条线）
       const nextId = updateId || conditionId;
       bodyResult.exitPoints.forEach((ep) => {
-        edges.push({ from: ep.id, to: nextId });
+        edges.push({ from: ep.id, to: nextId, label: ep.label ? undefined : "continue" });
       });
 
       if (updateId) {
-        edges.push({ from: updateId, to: conditionId });
+        // for 的循环继续线：自增/更新之后回到条件
+        edges.push({ from: updateId, to: conditionId, label: "continue" });
       }
     }
 
@@ -752,7 +753,7 @@ export class CAstParser extends AbstractParser {
       }
 
       bodyResult.exitPoints.forEach((ep) => {
-        edges.push({ from: ep.id, to: conditionId });
+        edges.push({ from: ep.id, to: conditionId, label: ep.label ? undefined : "continue" });
       });
     }
 
@@ -815,9 +816,9 @@ export class CAstParser extends AbstractParser {
     nodes.push(...bodyResult.nodes);
     edges.push(...bodyResult.edges);
 
-    // Connect body to condition
+    // Connect body to condition（do/while 的循环继续线）
     bodyResult.exitPoints.forEach((ep) => {
-      edges.push({ from: ep.id, to: conditionId });
+      edges.push({ from: ep.id, to: conditionId, label: ep.label ? undefined : "continue" });
     });
 
     // Connect condition back to body or to exit
@@ -1065,7 +1066,7 @@ export class CAstParser extends AbstractParser {
     );
 
     const edges: FlowchartEdge[] = [
-      { from: nodeId, to: loopContext.continueTargetId },
+      { from: nodeId, to: loopContext.continueTargetId, label: "continue" },
     ];
 
     this.locationMap.push({

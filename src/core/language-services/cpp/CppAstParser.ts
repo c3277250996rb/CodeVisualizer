@@ -824,7 +824,7 @@ export class CppAstParser extends AbstractParser {
       ...bodyResult.edges,
       { from: initId, to: conditionId }, // init to condition
       { from: conditionId, to: loopExitId, label: "false" }, // condition false exits
-      { from: updateId, to: conditionId }, // update back to condition
+      { from: updateId, to: conditionId, label: "continue" }, // update back to condition
     ];
 
     if (bodyResult.entryNodeId) {
@@ -1502,7 +1502,7 @@ export class CppAstParser extends AbstractParser {
       continueNode
     );
     const edges: FlowchartEdge[] = [
-      { from: nodeId, to: loopContext.continueTargetId },
+      { from: nodeId, to: loopContext.continueTargetId, label: "continue" },
     ];
     this.locationMap.push({
       start: continueNode.startIndex,

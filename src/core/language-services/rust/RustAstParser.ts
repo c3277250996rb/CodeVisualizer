@@ -1370,7 +1370,7 @@ protected processBlock(
     });
 
     if (loopContext) {
-      edges.push({ from: continueId, to: loopContext.continueTargetId });
+      edges.push({ from: continueId, to: loopContext.continueTargetId, label: "continue" });
       nodesConnectedToExit.add(continueId);
     }
 

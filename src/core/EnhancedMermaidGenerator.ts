@@ -35,12 +35,13 @@ export class EnhancedMermaidGenerator {
     NodeType.BREAK_CONTINUE,
   ]);
 
-  /** 边的布尔/分支标签：统一渲染成勾和叉 */
+  /** 边的布尔/分支标签：统一渲染成图形符号 */
   private static readonly EDGE_LABEL_GLYPHS: Record<string, string> = {
     true: "✔️",
     false: "✖",
     match: "✔️",
     "no match": "✖",
+    continue: "🔄",
   };
 
   /**
@@ -173,12 +174,19 @@ export class EnhancedMermaidGenerator {
     }
 
     // Generate edges efficiently
+    // “循环继续”边的目标就是循环头；既收又发 continue 边的节点就是循环枢轴（如 for 的自增节点）
+    const loopHeaderIds = new Set<string>();
+    const continueSources = new Set<string>();
     for (const edge of ir.edges) {
       this.sb.append("    ");
       this.sb.append(edge.from);
 
       if (edge.label) {
         const normalizedLabel = edge.label.trim().toLowerCase();
+        if (normalizedLabel === "continue") {
+          loopHeaderIds.add(edge.to);
+          continueSources.add(edge.from);
+        }
         // if 的 true/false 与 switch 的 match/no match 统一成勾和叉
         const displayLabel =
           EnhancedMermaidGenerator.EDGE_LABEL_GLYPHS[normalizedLabel] ?? edge.label;
@@ -204,6 +212,25 @@ export class EnhancedMermaidGenerator {
 
     // Generate enhanced styling class definitions
     this.generateClassDefinitions();
+
+    // 循环头 / 循环枢轴标记：不挂样式，只作为前端定位循环的钩子。
+    // 注意 mermaid 的 class 语句每行只能带一个类名（多类名会报 Syntax error），
+    // 但同节点的多条 class 语句会累加，所以拆成两轮输出。
+    for (const headerId of loopHeaderIds) {
+      this.sb.append("    class ");
+      this.sb.append(headerId);
+      this.sb.append(" node-loop-header");
+      this.sb.appendLine("");
+    }
+    for (const sourceId of continueSources) {
+      if (!loopHeaderIds.has(sourceId)) {
+        continue;
+      }
+      this.sb.append("    class ");
+      this.sb.append(sourceId);
+      this.sb.append(" node-loop-pivot");
+      this.sb.appendLine("");
+    }
 
     // Apply classes to nodes based on their semantic types
     for (const node of ir.nodes) {

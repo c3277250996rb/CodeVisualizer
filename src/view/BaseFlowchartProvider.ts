@@ -1660,7 +1660,8 @@ export abstract class BaseFlowchartProvider {
                 // 所以 "loop" 这类别名要依次尝试多个类名，再退化到按标签文字匹配。
                 const FOCUS_KIND_ALIASES = {
                     loop: {
-                        kinds: ['loop-start', 'loop-end'],
+                        // pivot 同时收/发 continue 边（如 for 的自增节点），两条 🔄 都在它旁边
+                        kinds: ['loop-start', 'loop-pivot', 'loop-header', 'loop-end'],
                         text: ['for (', 'for(', 'while (', 'while(', 'do {'],
                     },
                 };

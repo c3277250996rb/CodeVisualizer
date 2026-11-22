@@ -722,7 +722,7 @@ export class TsAstParser extends AbstractParser {
         nodeId: updateId,
       });
       // Connect update back to condition
-      edges.push({ from: updateId, to: conditionId });
+      edges.push({ from: updateId, to: conditionId, label: "continue" });
     }
 
     // Add the loop exit node
@@ -1342,7 +1342,7 @@ export class TsAstParser extends AbstractParser {
       nodeType: NodeType.BREAK_CONTINUE,
     };
     const edges: FlowchartEdge[] = [
-      { from: nodeId, to: loopContext.continueTargetId },
+      { from: nodeId, to: loopContext.continueTargetId, label: "continue" },
     ];
     this.locationMap.push({
       start: continueNode.startIndex,
