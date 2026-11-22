@@ -60,21 +60,35 @@ suite("C flowchart parser", () => {
     assert.ok(!mermaid.includes("- - - -"));
   });
 
-  // 冒烟测试：命令能把 WebView 面板拉起来即可，不截图、不操作鼠标、不等固定时长
-  test("opens the flowchart panel for the sample", async function () {
-    this.timeout(20000);
+  // 冒烟测试：全屏打开 my_adc.c 的 MyAdc_SendTelemetry，再把循环放大，
+  // 让 100ms 实拍能清楚录到真实渲染的画面
+  test("opens MyAdc_SendTelemetry and zooms into the loop", async function () {
+    this.timeout(40000);
     const extension = vscode.extensions.getExtension("ducphamngoc.codevisualizer");
     assert.ok(extension, "CodeVisualizer extension should be available in the test host");
     await extension.activate();
 
-    const samplePath = path.join(__dirname, "../../test-files/motor_comment_sample.c");
+    // 全屏 + 收起侧边栏/底部面板/辅助栏，画面只剩编辑器区，流程图才看得清
+    const tryCommand = async (command: string): Promise<void> => {
+      try {
+        await vscode.commands.executeCommand(command);
+      } catch (error) {
+        console.warn(`Command ${command} failed: ${error}`);
+      }
+    };
+    await tryCommand("workbench.action.toggleFullScreen");
+    await tryCommand("workbench.action.closeSidebar");
+    await tryCommand("workbench.action.closePanel");
+    await tryCommand("workbench.action.closeAuxiliaryBar");
+
+    const samplePath = path.join(__dirname, "../../test-files/my_adc.c");
     const document = await vscode.workspace.openTextDocument(vscode.Uri.file(samplePath));
     const editor = await vscode.window.showTextDocument(document, {
       viewColumn: vscode.ViewColumn.One,
       preview: false,
     });
-    const functionPosition = document.getText().indexOf("MyMotor_Init");
-    assert.ok(functionPosition >= 0, "Sample should contain MyMotor_Init");
+    const functionPosition = document.getText().indexOf("MyAdc_SendTelemetry");
+    assert.ok(functionPosition >= 0, "my_adc.c should contain MyAdc_SendTelemetry");
     const position = document.positionAt(functionPosition);
     editor.selection = new vscode.Selection(position, position);
 
@@ -94,6 +108,13 @@ suite("C flowchart parser", () => {
       10000
     );
     assert.ok(tab, "Flowchart webview panel should open");
+
+    // 等 mermaid 渲染完再放大到循环，并停留 1s 让录屏拍下放大后的画面
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await vscode.commands.executeCommand("codevisualizer.focusLoopNode");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
     await vscode.window.tabGroups.close(tab);
+    await tryCommand("workbench.action.toggleFullScreen");
   });
 });

@@ -1,8 +1,8 @@
-﻿# 精简版测试入口：默认只构建一次并跑 vscode-test，不再默认开录屏
+﻿# 测试入口：默认构建一次 + 跑 vscode-test + 全程 100ms 实拍录屏
 param(
     [switch]$SkipBuild,
     [switch]$FreshProfile,
-    [switch]$RecordScreen
+    [switch]$NoRecordScreen
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,8 +37,15 @@ try {
     New-Item -ItemType Directory -Path $userDataPath -Force | Out-Null
     $env:CODEVISUALIZER_TEST_USER_DATA = $userDataPath
 
-    # 录屏是可选能力：只有显式 -RecordScreen 才启动，也不参与成败判定
-    if ($RecordScreen) {
+    if ($SkipBuild) {
+        # npm run compile 会 rimraf out，所以 -SkipBuild 前必须确认测试代码还在
+        if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'out\test'))) {
+            throw '-SkipBuild 但 out/test 不存在：先完整跑一次（去掉 -SkipBuild）或执行 npm run compile-tests'
+        }
+    }
+
+    # 100ms 实拍是默认行为：录下测试期间窗口真实画面的全过程，只记录不参与成败判定
+    if (-not $NoRecordScreen) {
         $captureDirectory = Join-Path $env:TEMP ("CodeVisualizer-screen-" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
         New-Item -ItemType Directory -Path $captureDirectory -Force | Out-Null
         $stopFile = Join-Path $captureDirectory 'stop'
@@ -58,12 +65,20 @@ try {
             $stopFile
             '-ReadyFile'
             $readyFile
+            '-ActivateWindowTitle'
+            # 标题含空格，Start-Process 的数组参数用空格拼接，必须自己带引号
+            '"*Extension Development Host*"'
         )
         $recorder = Start-Process -FilePath 'powershell.exe' -ArgumentList $recorderArguments -PassThru -WindowStyle Hidden
         $readyWait = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not (Test-Path -LiteralPath $readyFile) -and $readyWait.Elapsed.TotalSeconds -lt 5) {
             Start-Sleep -Milliseconds 50
         }
+        # 录屏脚本起不来时不要静默变成 0 帧，明确报出来
+        if (-not (Test-Path -LiteralPath $readyFile)) {
+            Write-Output "SCREEN_CAPTURE_WARNING=recorder-not-ready $captureDirectory"
+        }
+        Write-Output 'SCREEN_CAPTURE_INTERVAL_MS=100'
         Write-Output "SCREEN_CAPTURE_DIRECTORY=$captureDirectory"
     }
 
@@ -75,8 +90,20 @@ finally {
     if ($recorder) {
         New-Item -ItemType File -Path (Join-Path $captureDirectory 'stop') -Force | Out-Null
         $recorder.WaitForExit()
-        $frameCount = @(Get-ChildItem -LiteralPath $captureDirectory -Filter 'frame-*.jpg' -File).Count
-        Write-Output "SCREEN_CAPTURE_FRAME_COUNT=$frameCount"
+        $frames = @(Get-ChildItem -LiteralPath $captureDirectory -Filter 'frame-*.jpg' -File)
+        Write-Output "SCREEN_CAPTURE_FRAME_COUNT=$($frames.Count)"
+        $timingLogPath = Join-Path $captureDirectory 'frames.csv'
+        if (Test-Path -LiteralPath $timingLogPath) {
+            # 用记录里的时间戳反算真实帧间隔，确认是 100ms 级实拍
+            $rows = @(Get-Content -LiteralPath $timingLogPath | Select-Object -Skip 1)
+            if ($rows.Count -gt 1) {
+                $firstElapsed = [double]($rows[0].Split(',')[1])
+                $lastElapsed = [double]($rows[$rows.Count - 1].Split(',')[1])
+                $averageInterval = [math]::Round(($lastElapsed - $firstElapsed) / ($rows.Count - 1), 1)
+                Write-Output "SCREEN_CAPTURE_AVERAGE_INTERVAL_MS=$averageInterval"
+            }
+            Write-Output "SCREEN_CAPTURE_TIMING_LOG=$timingLogPath"
+        }
     }
     $env:CODEVISUALIZER_TEST_USER_DATA = $previousUserDataPath
     $env:CODEVISUALIZER_CAPTURE_DIRECTORY = $previousCaptureDirectory

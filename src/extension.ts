@@ -96,6 +96,11 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }),
 
+    // 放大到当前图里的第一个循环节点（循环看不清时一键定位）
+    vscode.commands.registerCommand("codevisualizer.focusLoopNode", () => {
+      FlowchartPanelProvider.getInstance(context.extensionUri).focusNodeKind("loop");
+    }),
+
     vscode.commands.registerCommand(
       "codevisualizer.openFlowchartInNewColumn",
       async () => {

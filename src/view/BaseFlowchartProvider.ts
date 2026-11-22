@@ -144,6 +144,8 @@ export abstract class BaseFlowchartProvider {
   protected _lastDocumentUri?: string;
   /** 交互期间跳过的刷新，交互结束后补做。 */
   protected _pendingUpdate: boolean = false;
+  /** 页面未就绪时挂起的节点聚焦请求。 */
+  private _pendingFocusKind?: string;
 
   constructor(protected readonly _extensionUri: vscode.Uri) {
     // Detect environment and apply any necessary compatibility fixes
@@ -369,6 +371,7 @@ export abstract class BaseFlowchartProvider {
       case "webviewReady": {
         // 页面脚本就绪后，后续更新才能安全地走消息通道
         this._webviewReady = true;
+        this.flushPendingFocus();
         break;
       }
 
@@ -562,6 +565,31 @@ export abstract class BaseFlowchartProvider {
         payload: { nodeId: sanitizedNodeId },
       });
     }
+  }
+
+  /**
+   * 放大并居中到指定类型的节点（例如 loop-start），供面板命令调用。
+   * 页面未就绪（还在加载/重渲染）时先存起来，等 webviewReady 或渲染完成再发。
+   */
+  public focusNodeKind(kind: string): void {
+    const webview = this.getWebview();
+    if (!webview || !this._webviewReady || !this._htmlRendered) {
+      this._pendingFocusKind = kind;
+      return;
+    }
+    webview.postMessage({
+      command: "focusNodeKind",
+      payload: { kind },
+    });
+  }
+
+  private flushPendingFocus(): void {
+    const kind = this._pendingFocusKind;
+    if (!kind) {
+      return;
+    }
+    this._pendingFocusKind = undefined;
+    this.focusNodeKind(kind);
   }
 
   /**
@@ -849,6 +877,9 @@ export abstract class BaseFlowchartProvider {
       });
       this._lastStructureKey = snapshot.structureKey;
       this._lastDocumentUri = document.uri.toString();
+
+      // 挂起的聚焦请求（如图还没画出来时按下的“放大到循环”）在渲染后补发
+      this.flushPendingFocus();
 
       // After updating the view, immediately highlight the node for the current cursor
       const offset = editor.document.offsetAt(editor.selection.active);
@@ -1180,6 +1211,8 @@ export abstract class BaseFlowchartProvider {
             let highlightedNodeId = null;
             // 重渲染后复用的 pan/zoom 实例
             let panZoomInstance = null;
+            // 由面板命令触发的节点聚焦处理（setupInteractions 里赋值）
+            let focusNodeKindHandler = null;
 
             function applyHeaderComment(text) {
                 const el = document.getElementById('function-comment');
@@ -1332,6 +1365,12 @@ export abstract class BaseFlowchartProvider {
                             if (newElem) newElem.classList.add('highlighted');
                         }
                         highlightedNodeId = newId;
+                        break;
+
+                    case 'focusNodeKind':
+                        if (typeof focusNodeKindHandler === 'function') {
+                            focusNodeKindHandler(message.payload && message.payload.kind);
+                        }
                         break;
 
                     case 'nodeZoomFontScale':
@@ -1615,6 +1654,50 @@ export abstract class BaseFlowchartProvider {
                     };
                     requestAnimationFrame(centerStep);
                   });
+
+                // 按节点类型定位并复用右键聚焦的放大逻辑。
+                // C 解析器产出的是 decision + loop_end，Python/JS 才有 loop_start，
+                // 所以 "loop" 这类别名要依次尝试多个类名，再退化到按标签文字匹配。
+                const FOCUS_KIND_ALIASES = {
+                    loop: {
+                        kinds: ['loop-start', 'loop-end'],
+                        text: ['for (', 'for(', 'while (', 'while(', 'do {'],
+                    },
+                };
+                focusNodeKindHandler = (kind, attempt) => {
+                    const alias = FOCUS_KIND_ALIASES[String(kind || '').toLowerCase()];
+                    const kinds = alias ? alias.kinds : [String(kind || '').replace(/^node-/, '')];
+                    const texts = alias ? alias.text || [] : [];
+                    let target = null;
+                    for (const name of kinds) {
+                        target =
+                            svgElement.querySelector('.node.node-' + name) ||
+                            svgElement.querySelector('.node.' + name);
+                        if (target) {
+                            break;
+                        }
+                    }
+                    if (!target && texts.length > 0) {
+                        target = Array.from(svgElement.querySelectorAll('.node')).find((node) => {
+                            const text = (node.textContent || '').replace(/\s+/g, ' ');
+                            return texts.some((token) => text.indexOf(token) >= 0);
+                        }) || null;
+                    }
+                    if (!target) {
+                        // 图可能还在重渲染，短暂重试
+                        const tries = (attempt || 0) + 1;
+                        if (tries <= 20) {
+                            setTimeout(() => focusNodeKindHandler(kind, tries), 100);
+                        }
+                        return;
+                    }
+                    // 直接走已有的右键聚焦分支，避免重复实现一套缩放算法
+                    try {
+                        target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, view: window }));
+                    } catch (error) {
+                        console.warn('[CodeVisualizer] focus node failed:', error);
+                    }
+                };
 
                 // Track mouse interactions for panning/dragging
                 let isMouseDown = false;
