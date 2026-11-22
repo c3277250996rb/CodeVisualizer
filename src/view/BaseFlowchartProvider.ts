@@ -681,7 +681,7 @@ export abstract class BaseFlowchartProvider {
             font-display: swap;
           }
             :root {
-                --hover-fill: rgba(255, 165, 0, 0.3);
+                --hover-fill: rgba(255, 165, 0, 0.18);
                 --hover-stroke: #ff6b35;
                 --hover-stroke-width: 3px;
                 --hover-edge-color: #ff6b35;
@@ -744,6 +744,21 @@ export abstract class BaseFlowchartProvider {
               font-family: 'JetBrains Mono', Consolas, monospace !important;
               font-size: 0.85em !important;
             }
+            /* 合并块内的行：只做行级反馈，整块轮廓交给节点外框 */
+            .mermaid .code-cell {
+              font-family: 'JetBrains Mono', Consolas, monospace !important;
+            }
+            .mermaid .code-cell:hover {
+              background: rgba(255, 165, 0, 0.10) !important;
+              box-shadow: inset 2px 0 0 var(--hover-stroke);
+            }
+            .mermaid .code-cell:hover .code-cell-code,
+            .mermaid .code-cell:hover .code-cell-comment {
+              filter: drop-shadow(0 0 6px var(--hover-stroke));
+            }
+            .mermaid .code-cell-comment {
+              font-style: italic;
+            }
             .mermaid .boolean-edge-label,
             .mermaid .boolean-edge-label * {
               font-family: 'Segoe UI Symbol', sans-serif !important;
@@ -766,6 +781,11 @@ export abstract class BaseFlowchartProvider {
                 stroke-width: 4px !important;
             }
 
+            /* 合并块只在小节上做选中反馈，悬停不给整块铺色（B 已去除） */
+            .mermaid .node.highlighted .code-cell {
+              background: rgba(90, 160, 255, 0.12) !important;
+            }
+
             /* Transitions */
             .mermaid svg .node > *, .mermaid .edge-path, .mermaid .edge-path path, .mermaid .arrowhead, .mermaid .arrowhead path, .mermaid line, .mermaid g > path {
                 transition: fill 0.15s ease-in-out, stroke 0.15s ease-in-out, filter 0.15s ease-in-out, stroke-width 0.15s ease-in-out;
@@ -780,6 +800,12 @@ export abstract class BaseFlowchartProvider {
                 stroke: var(--hover-stroke) !important;
                 stroke-width: var(--hover-stroke-width) !important;
                 filter: drop-shadow(0 0 8px var(--hover-stroke));
+            }
+
+            /* 合并块：外框保留背景光晕（A），文字层不加光晕，文字光晕只给悬停行（C） */
+            .mermaid svg .node.hover-highlight:has(.code-stack) > g.label,
+            .mermaid svg .node.child-highlight:has(.code-stack) > g.label {
+                filter: none !important;
             }
             
             /* Enhanced edge highlighting that works with different Mermaid edge structures */
@@ -1316,6 +1342,20 @@ export abstract class BaseFlowchartProvider {
                         document.querySelectorAll('.hover-highlight, .child-highlight').forEach(el => {
                             el.classList.remove('hover-highlight', 'child-highlight');
                         });
+                    });
+                });
+
+                // 合并块内的每个小节单独可点，点击定位到该语句本身
+                svgElement.querySelectorAll('.code-cell[data-start]').forEach((cell) => {
+                    const start = Number(cell.getAttribute('data-start'));
+                    const end = Number(cell.getAttribute('data-end'));
+                    if (!isFinite(start) || !isFinite(end)) {
+                        return;
+                    }
+                    cell.addEventListener('click', (event) => {
+                        // 阻止事件冒泡到整个节点，避免选中整块范围
+                        event.stopPropagation();
+                        onNodeClick(start, end);
                     });
                 });
             }

@@ -1,4 +1,4 @@
-import { FlowchartIR, FlowchartNode, FlowchartEdge, NodeType } from "../ir/ir";
+import { FlowchartIR, FlowchartNode, FlowchartEdge, NodeSegment, NodeType } from "../ir/ir";
 import { StringProcessor } from "./utils/StringProcessor";
 import { SubtleThemeManager, ThemeStyles } from "./utils/ThemeManager";
 
@@ -104,8 +104,11 @@ export class EnhancedMermaidGenerator {
     // Generate nodes efficiently
     for (const node of ir.nodes) {
       const shape = this.getShape(node);
-      const codeLabel = this.escapeString(node.label);
-      const codeBlock = `<div class="code-label" style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${codeLabel}</div>`;
+      const segments = node.segments ?? [];
+      const isMergedBlock = segments.length > 1;
+      const codeBlock = isMergedBlock
+        ? this.renderSegmentStack(segments)
+        : `<div class="code-label" style="display:table;margin:0 auto;padding:2px 4px;text-align:left;white-space:nowrap">${this.escapeString(node.label)}</div>`;
       const label = node.comment
         ? `<div class="code-comment" style="display:table;max-width:100%;margin:0 auto;padding:2px 4px 5px;text-align:left">${this.escapeString(node.comment)}</div>${codeBlock}`
         : codeBlock;
@@ -195,6 +198,28 @@ export class EnhancedMermaidGenerator {
     }
 
     return this.sb.toString();
+  }
+
+  /**
+   * 把合并块内每条语句渲染成一行，行间只用细分隔线，块本身沿用节点外框。
+   */
+  private renderSegmentStack(segments: NodeSegment[]): string {
+    const cells = segments.map((segment, index) => {
+      const styles = [
+        "margin:0",
+        "padding:2px 4px",
+        index === 0 ? "border-top:none" : "border-top:1px solid rgba(128,128,128,0.45)",
+        "text-align:left",
+        "white-space:nowrap",
+        "cursor:pointer",
+      ];
+      const comment = segment.comment
+        ? `<div class="code-cell-comment" style="padding-bottom:1px;margin-bottom:1px;border-bottom:1px dashed rgba(128,128,128,0.45);font-size:0.85em;font-style:italic;color:var(--vscode-descriptionForeground,#9aa0a6)">${this.escapeString(segment.comment)}</div>`
+        : "";
+      const code = `<div class="code-cell-code">${this.escapeString(segment.code)}</div>`;
+      return `<div class="code-cell" data-start="${segment.start}" data-end="${segment.end}" style="${styles.join(";")}">${comment}${code}</div>`;
+    });
+    return `<div class="code-stack" style="display:flex;flex-direction:column;align-items:stretch;margin:0;padding:0">${cells.join("")}</div>`;
   }
 
   private generateClassDefinitions(): void {

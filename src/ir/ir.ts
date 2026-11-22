@@ -41,6 +41,16 @@ export interface SemanticNodeInfo {
   language?: string;
 }
 
+export interface NodeSegment {
+  /** 该语句在源码中的起止偏移。 */
+  start: number;
+  end: number;
+  /** 该语句自己的注释（已拼成单行）。 */
+  comment?: string;
+  /** 该语句的展示文本（已拼成单行）。 */
+  code: string;
+}
+
 export interface FlowchartNode {
   id: string;
   label: string;
@@ -53,6 +63,9 @@ export interface FlowchartNode {
   nodeCategory?: NodeCategory;
 
   semanticInfo?: SemanticNodeInfo;
+
+  /** 合并块内逐条语句的源码范围，用于每个小节单独点击跳转。 */
+  segments?: NodeSegment[];
 }
 
 export interface FlowchartEdge {

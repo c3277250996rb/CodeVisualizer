@@ -8,6 +8,7 @@ import { analyzeCCode } from "./language-services/c";
 import { analyzeRustCode } from "./language-services/rust";
 import { analyzeGoCode } from "./language-services/go";
 import { analyzePhpCode } from "./language-services/php";
+import { StatementMerger } from "./utils/StatementMerger";
 
 /**
  * Analyzes the given source code and generates a flowchart.
@@ -18,6 +19,23 @@ import { analyzePhpCode } from "./language-services/php";
  * @returns A FlowchartIR representation of the code.
  */
 export async function analyzeCode(
+  sourceCode: string,
+  languageId: string,
+  functionName?: string,
+  position?: number
+): Promise<FlowchartIR> {
+  const flowchartIR = await analyzeByLanguage(
+    sourceCode,
+    languageId,
+    functionName,
+    position
+  );
+
+  // 连续常规语句合并为一个节点，避免流程图中全是单语句节点
+  return StatementMerger.mergeOrdinaryStatements(flowchartIR);
+}
+
+async function analyzeByLanguage(
   sourceCode: string,
   languageId: string,
   functionName?: string,
